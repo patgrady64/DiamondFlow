@@ -42,4 +42,28 @@ class GameEngineTest {
 
         assertTrue(afterHomeRun.bases.isEmpty())
     }
+
+    @Test
+    fun third_out_moves_game_to_bottom_of_inning() {
+        val state = GameState(
+            outs = 2,
+            currentInning = 1,
+            topOfInning = true,
+            activeTeam = Team.AWAY
+        )
+
+        val result = engine.applyPlay(
+            state = state,
+            play = Play(
+                action = PlayAction.STRIKEOUT,
+                batterId = 10
+            )
+        )
+
+        assertEquals(0, result.outs)
+        assertEquals(1, result.currentInning)
+        assertEquals(false, result.topOfInning)
+        assertEquals(Team.HOME, result.activeTeam)
+        assertEquals(true, result.bases.isEmpty())
+    }
 }

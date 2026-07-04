@@ -1,6 +1,7 @@
 package com.pgdevhouse.diamondflow.logic
 
 import com.pgdevhouse.diamondflow.engine.CountEngine
+import com.pgdevhouse.diamondflow.engine.InningEngine
 import com.pgdevhouse.diamondflow.engine.OutEngine
 import com.pgdevhouse.diamondflow.engine.RunnerEngine
 import com.pgdevhouse.diamondflow.engine.ScoreEngine
@@ -37,6 +38,8 @@ class GameEngine {
             state = updatedState,
             runsScored = runnerResult.runsScored
         )
+
+        updatedState = InningEngine.apply(updatedState)
 
         return updatedState
     }
