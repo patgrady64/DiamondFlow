@@ -1,0 +1,6 @@
+pitch tracking
+spray charts
+substitutions
+undo/redo
+exports
+stats

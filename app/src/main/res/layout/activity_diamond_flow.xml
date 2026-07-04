@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:padding="16dp"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <!-- BALLS -->
+    <TextView
+        android:id="@+id/ballsText"
+        android:text="0"
+        android:textSize="32sp"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"/>
+
+    <Button
+        android:id="@+id/ballPlus"
+        android:text="Ball +"
+        android:layout_width="match_parent"
+        android:layout_height="60dp"/>
+
+    <!-- STRIKES -->
+    <TextView
+        android:id="@+id/strikesText"
+        android:text="0"
+        android:textSize="32sp"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"/>
+
+    <Button
+        android:id="@+id/strikePlus"
+        android:text="Strike +"
+        android:layout_width="match_parent"
+        android:layout_height="60dp"/>
+
+    <!-- OUTS -->
+    <TextView
+        android:id="@+id/outsText"
+        android:text="0"
+        android:textSize="32sp"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"/>
+
+    <Button
+        android:id="@+id/outPlus"
+        android:text="Out +"
+        android:layout_width="match_parent"
+        android:layout_height="60dp"/>
+
+</LinearLayout>
