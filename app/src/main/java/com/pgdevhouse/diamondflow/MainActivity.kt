@@ -7,24 +7,13 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.app.Activity
-import com.pgdevhouse.diamondflow.logic.GameEngine
-import com.pgdevhouse.diamondflow.model.Base
-import com.pgdevhouse.diamondflow.model.GameSnapshot
-import com.pgdevhouse.diamondflow.model.GameState
-import com.pgdevhouse.diamondflow.model.PitchAction
-import com.pgdevhouse.diamondflow.model.Play
-import com.pgdevhouse.diamondflow.model.PlayAction
+import com.pgdevhouse.diamondflow.controller.GameController
 import com.pgdevhouse.diamondflow.model.Player
 import com.pgdevhouse.diamondflow.model.Team
 
 class MainActivity : Activity() {
 
-    private val engine = GameEngine()
-
-    private var state = GameState(
-        lineupAway = defaultLineup(prefix = "Away"),
-        lineupHome = defaultLineup(prefix = "Home")
-    )
+    private val controller = GameController()
 
     private lateinit var inningText: TextView
     private lateinit var scoreText: TextView
@@ -55,93 +44,57 @@ class MainActivity : Activity() {
         basesText = label(root)
 
         addButton(root, "Ball") {
-            state = engine.applyPitch(
-                state = state,
-                pitch = PitchAction.BALL
-            )
+            controller.ball()
             render()
         }
 
         addButton(root, "Strike") {
-            state = engine.applyPitch(
-                state = state,
-                pitch = PitchAction.STRIKE
-            )
+            controller.strike()
             render()
         }
 
         addButton(root, "Foul") {
-            state = engine.applyPitch(
-                state = state,
-                pitch = PitchAction.FOUL
-            )
+            controller.foul()
             render()
         }
 
         addButton(root, "Single") {
-            state = engine.applyPlay(
-                state = state,
-                play = Play(action = PlayAction.SINGLE)
-            )
+            controller.single()
             render()
         }
 
         addButton(root, "Double") {
-            state = engine.applyPlay(
-                state = state,
-                play = Play(action = PlayAction.DOUBLE)
-            )
+            controller.double()
             render()
         }
 
         addButton(root, "Triple") {
-            state = engine.applyPlay(
-                state = state,
-                play = Play(action = PlayAction.TRIPLE)
-            )
+            controller.triple()
             render()
         }
 
         addButton(root, "Home Run") {
-            state = engine.applyPlay(
-                state = state,
-                play = Play(action = PlayAction.HOME_RUN)
-            )
+            controller.homeRun()
             render()
         }
 
         addButton(root, "Ground Out") {
-            state = engine.applyPlay(
-                state = state,
-                play = Play(action = PlayAction.GROUND_OUT)
-            )
+            controller.groundOut()
             render()
         }
 
         addButton(root, "Fly Out") {
-            state = engine.applyPlay(
-                state = state,
-                play = Play(action = PlayAction.FLY_OUT)
-            )
+            controller.flyOut()
             render()
         }
 
         addButton(root, "Bases Loaded Test") {
-            state = state.copy(
-                bases = com.pgdevhouse.diamondflow.model.Bases(
-                    first = com.pgdevhouse.diamondflow.model.Runner(91, Base.FIRST),
-                    second = com.pgdevhouse.diamondflow.model.Runner(92, Base.SECOND),
-                    third = com.pgdevhouse.diamondflow.model.Runner(93, Base.THIRD)
-                )
-            )
+            controller.loadBasesForTesting()
             render()
         }
 
         addButton(root, "Reset Game") {
-            state = GameState(
-                lineupAway = defaultLineup(prefix = "Away"),
-                lineupHome = defaultLineup(prefix = "Home")
-            )
+            controller.resetGame()
             render()
         }
 
@@ -150,11 +103,11 @@ class MainActivity : Activity() {
     }
 
     private fun render() {
-        val snapshot = GameSnapshot.from(state)
+        val snapshot = controller.snapshot
 
         inningText.text = "Inning: ${snapshot.inningLabel}"
         scoreText.text = "Score: ${snapshot.scoreLabel}"
-        teamText.text = "Batting: ${activeTeamLabel(state.activeTeam)}"
+        teamText.text = "Batting: ${activeTeamLabel(controller.state.activeTeam)}"
         batterText.text = "Batter: ${snapshot.currentBatterName ?: "No batter"}"
         countText.text = "Count: ${snapshot.countLabel}"
         outsText.text = "Outs: ${snapshot.outsLabel}"
