@@ -176,4 +176,27 @@ class GameEngineTest {
 
         assertEquals(1, result.awayBatterIndex)
     }
+
+    @Test
+    fun play_without_batter_id_uses_current_lineup_batter() {
+        val state = GameState(
+            activeTeam = Team.AWAY,
+            awayBatterIndex = 0,
+            lineupAway = listOf(
+                Player(id = 1, name = "Player 1"),
+                Player(id = 2, name = "Player 2"),
+                Player(id = 3, name = "Player 3")
+            )
+        )
+
+        val result = engine.applyPlay(
+            state = state,
+            play = Play(
+                action = PlayAction.SINGLE
+            )
+        )
+
+        assertEquals(1, result.bases.first?.playerId)
+        assertEquals(1, result.awayBatterIndex)
+    }
 }
