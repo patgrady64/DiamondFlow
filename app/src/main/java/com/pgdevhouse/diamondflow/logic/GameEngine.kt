@@ -16,7 +16,7 @@ class GameEngine {
     fun applyPitch(
         state: GameState,
         pitch: PitchAction,
-        batterId: Int
+        batterId: Int = -1
     ): GameState {
 
         val pitchResolution = PitchEngine.apply(
