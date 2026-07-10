@@ -19,5 +19,8 @@ data class GameState(
     val scores: Map<Team, List<Int>> = mapOf(
         Team.AWAY to List(9) { 0 },
         Team.HOME to List(9) { 0 }
-    )
+    ),
+
+    val awayBatterIndex: Int = 0,
+    val homeBatterIndex: Int = 0
 )

@@ -7,6 +7,7 @@ import com.pgdevhouse.diamondflow.model.GameState
 import com.pgdevhouse.diamondflow.model.PitchAction
 import com.pgdevhouse.diamondflow.model.Play
 import com.pgdevhouse.diamondflow.model.PlayAction
+import com.pgdevhouse.diamondflow.model.Player
 import com.pgdevhouse.diamondflow.model.Runner
 import com.pgdevhouse.diamondflow.model.Team
 import org.junit.Assert.assertEquals
@@ -151,5 +152,28 @@ class GameEngineTest {
             1,
             result.scores[Team.AWAY]?.get(0)
         )
+    }
+
+    @Test
+    fun completed_play_advances_away_batter_index() {
+        val state = GameState(
+            activeTeam = Team.AWAY,
+            awayBatterIndex = 0,
+            lineupAway = listOf(
+                Player(id = 1, name = "Player 1"),
+                Player(id = 2, name = "Player 2"),
+                Player(id = 3, name = "Player 3")
+            )
+        )
+
+        val result = engine.applyPlay(
+            state = state,
+            play = Play(
+                action = PlayAction.SINGLE,
+                batterId = 1
+            )
+        )
+
+        assertEquals(1, result.awayBatterIndex)
     }
 }

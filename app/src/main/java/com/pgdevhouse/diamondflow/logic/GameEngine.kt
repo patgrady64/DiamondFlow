@@ -9,6 +9,7 @@ import com.pgdevhouse.diamondflow.engine.ScoreEngine
 import com.pgdevhouse.diamondflow.model.GameState
 import com.pgdevhouse.diamondflow.model.PitchAction
 import com.pgdevhouse.diamondflow.model.Play
+import com.pgdevhouse.diamondflow.engine.LineupEngine
 
 class GameEngine {
 
@@ -40,7 +41,7 @@ class GameEngine {
             state = updatedState,
             runsScored = runnerResult.runsScored
         )
-
+        updatedState = LineupEngine.apply(updatedState)
         updatedState = InningEngine.apply(updatedState)
 
         return updatedState
