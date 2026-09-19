@@ -2,10 +2,14 @@ package com.pgdevhouse.diamondflow.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val Purple80 = Color(0xFFD0BCFF)
-val PurpleGrey80 = Color(0xFFCCC2DC)
-val Pink80 = Color(0xFFEFB8C8)
+// InningTrack palette from the supplied reference image.
+val DiamondGreen = Color(0xFF408C3A)
+val DiamondBrown = Color(0xFF8C5B3A)
+val DiamondViolet = Color(0xFF443A8C)
+val DiamondForest = Color(0xFF2A3729)
+val DiamondCream = Color(0xFFFFEEE3)
 
-val Purple40 = Color(0xFF6650a4)
-val PurpleGrey40 = Color(0xFF625b71)
-val Pink40 = Color(0xFF7D5260)
+val DiamondCreamSurface = Color(0xFFFFF8F3)
+val DiamondCreamVariant = Color(0xFFF3DED2)
+val DiamondForestSoft = Color(0xFF344533)
+val DiamondOnDark = Color(0xFFFFEEE3)

@@ -4,8 +4,10 @@ data class Play(
     val action: PlayAction,
     val batterId: Int = -1,
     val fielding: FieldingPlay? = null,
+    val batterResponsiblePitcherName: String? = null,
     val manualRunnerDestinations: Map<Int, Base?> = emptyMap(),
-    val outsRecorded: Int = action.defaultOuts
+    val outsRecorded: Int = action.defaultOuts,
+    val responsiblePitcherName: String? = null
 ) {
     init {
         require(outsRecorded in 0..3) {

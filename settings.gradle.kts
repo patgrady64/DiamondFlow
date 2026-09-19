@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "DiamondFlow"
+rootProject.name = "InningTrack"
 include(":app")

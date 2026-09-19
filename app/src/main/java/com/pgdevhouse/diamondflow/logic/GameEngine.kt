@@ -7,6 +7,7 @@ import com.pgdevhouse.diamondflow.engine.OutEngine
 import com.pgdevhouse.diamondflow.engine.PitchEngine
 import com.pgdevhouse.diamondflow.engine.RunnerEngine
 import com.pgdevhouse.diamondflow.engine.ScoreEngine
+import com.pgdevhouse.diamondflow.engine.StatEngine
 import com.pgdevhouse.diamondflow.model.GameState
 import com.pgdevhouse.diamondflow.model.PitchAction
 import com.pgdevhouse.diamondflow.model.Play
@@ -18,6 +19,9 @@ class GameEngine {
         pitch: PitchAction,
         batterId: Int = -1
     ): GameState {
+        if (state.gameOver) {
+            return state
+        }
 
         val pitchResolution = PitchEngine.apply(
             state = state,
@@ -41,6 +45,9 @@ class GameEngine {
         state: GameState,
         play: Play
     ): GameState {
+        if (state.gameOver) {
+            return state
+        }
 
         val resolvedPlay = resolveBatter(
             state = state,
@@ -71,8 +78,12 @@ class GameEngine {
             runsScored = runnerResult.runsScored
         )
 
-        updatedState = LineupEngine.apply(updatedState)
+        updatedState = StatEngine.apply(
+            state = updatedState,
+            play = resolvedPlay
+        )
 
+        updatedState = LineupEngine.apply(updatedState)
         updatedState = InningEngine.apply(updatedState)
 
         return updatedState
@@ -82,15 +93,22 @@ class GameEngine {
         state: GameState,
         play: Play
     ): Play {
+        val fieldingTeam = if (state.activeTeam == com.pgdevhouse.diamondflow.model.Team.AWAY) {
+            com.pgdevhouse.diamondflow.model.Team.HOME
+        } else {
+            com.pgdevhouse.diamondflow.model.Team.AWAY
+        }
+        val pitcher = play.responsiblePitcherName ?: state.pitcherName(fieldingTeam)
         if (play.batterId != -1) {
-            return play
+            return play.copy(responsiblePitcherName = pitcher)
         }
 
         val currentBatter = LineupEngine.currentBatter(state)
-            ?: return play
+            ?: return play.copy(responsiblePitcherName = pitcher)
 
         return play.copy(
-            batterId = currentBatter.id
+            batterId = currentBatter.id,
+            responsiblePitcherName = pitcher
         )
     }
 }

@@ -14,60 +14,56 @@ object LineupEngine {
     }
 
     fun currentBatter(state: GameState): Player? {
-        return when (state.activeTeam) {
-            Team.AWAY -> batterFromLineup(
-                lineup = state.lineupAway,
-                index = state.awayBatterIndex
-            )
+        return batterForTeam(state, state.activeTeam)
+    }
 
-            Team.HOME -> batterFromLineup(
-                lineup = state.lineupHome,
-                index = state.homeBatterIndex
-            )
+    fun batterForTeam(state: GameState, team: Team): Player? {
+        return when (team) {
+            Team.AWAY -> batterFromLineup(state.lineupAway, state.awayBatterIndex)
+                ?: state.awayUnknownBatterId?.let { Player(id = it, name = "Unknown") }
+            Team.HOME -> batterFromLineup(state.lineupHome, state.homeBatterIndex)
+                ?: state.homeUnknownBatterId?.let { Player(id = it, name = "Unknown") }
         }
     }
 
     private fun advanceAwayBatter(state: GameState): GameState {
-        if (state.lineupAway.isEmpty()) {
-            return state
-        }
-
-        return state.copy(
-            awayBatterIndex = nextIndex(
-                currentIndex = state.awayBatterIndex,
-                lineupSize = state.lineupAway.size
+        if (state.lineupAway.isEmpty()) return state
+        if (state.awayBatterIndex >= 0) {
+            return state.copy(
+                awayBatterIndex = nextIndex(state.awayBatterIndex, state.lineupAway.size),
+                awayUnknownBatterId = null
             )
-        )
+        }
+        if (state.awayUnknownBatterId != null) {
+            return state.copy(
+                awayUnknownBatterId = state.nextUnknownPlayerId,
+                nextUnknownPlayerId = state.nextUnknownPlayerId - 1
+            )
+        }
+        return state
     }
 
     private fun advanceHomeBatter(state: GameState): GameState {
-        if (state.lineupHome.isEmpty()) {
-            return state
-        }
-
-        return state.copy(
-            homeBatterIndex = nextIndex(
-                currentIndex = state.homeBatterIndex,
-                lineupSize = state.lineupHome.size
+        if (state.lineupHome.isEmpty()) return state
+        if (state.homeBatterIndex >= 0) {
+            return state.copy(
+                homeBatterIndex = nextIndex(state.homeBatterIndex, state.lineupHome.size),
+                homeUnknownBatterId = null
             )
-        )
-    }
-
-    private fun nextIndex(
-        currentIndex: Int,
-        lineupSize: Int
-    ): Int {
-        return (currentIndex + 1) % lineupSize
-    }
-
-    private fun batterFromLineup(
-        lineup: List<Player>,
-        index: Int
-    ): Player? {
-        if (lineup.isEmpty()) {
-            return null
         }
+        if (state.homeUnknownBatterId != null) {
+            return state.copy(
+                homeUnknownBatterId = state.nextUnknownPlayerId,
+                nextUnknownPlayerId = state.nextUnknownPlayerId - 1
+            )
+        }
+        return state
+    }
 
+    private fun nextIndex(currentIndex: Int, lineupSize: Int): Int = (currentIndex + 1) % lineupSize
+
+    private fun batterFromLineup(lineup: List<Player>, index: Int): Player? {
+        if (lineup.isEmpty() || index < 0) return null
         return lineup[index % lineup.size]
     }
 }

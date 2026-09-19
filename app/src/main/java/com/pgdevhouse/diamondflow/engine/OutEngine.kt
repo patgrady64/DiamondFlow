@@ -10,7 +10,7 @@ object OutEngine {
         play: Play
     ): GameState {
         return state.copy(
-            outs = state.outs + play.outsRecorded
+            outs = (state.outs + play.outsRecorded).coerceAtMost(3)
         )
     }
 }

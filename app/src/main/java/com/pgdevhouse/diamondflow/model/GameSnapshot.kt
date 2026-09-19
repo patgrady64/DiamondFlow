@@ -13,20 +13,15 @@ data class GameSnapshot(
     companion object {
 
         fun from(state: GameState): GameSnapshot {
-            val awayRuns = state.scores[Team.AWAY]?.sum() ?: 0
-            val homeRuns = state.scores[Team.HOME]?.sum() ?: 0
+            val awayRuns = state.totalRuns(Team.AWAY)
+            val homeRuns = state.totalRuns(Team.HOME)
 
-            val inningHalf = if (state.topOfInning) {
-                "Top"
-            } else {
-                "Bottom"
-            }
-
+            val inningHalf = if (state.topOfInning) "Top" else "Bottom"
             val batter = LineupEngine.currentBatter(state)
 
             return GameSnapshot(
                 inningLabel = "$inningHalf ${state.currentInning}",
-                scoreLabel = "Away $awayRuns - Home $homeRuns",
+                scoreLabel = "${state.awayTeamName} $awayRuns - ${state.homeTeamName} $homeRuns",
                 countLabel = "${state.balls}-${state.strikes}",
                 outsLabel = "${state.outs} ${outWord(state.outs)}",
                 basesLabel = basesLabel(state.bases),
@@ -34,34 +29,14 @@ data class GameSnapshot(
             )
         }
 
-        private fun outWord(outs: Int): String {
-            return if (outs == 1) {
-                "out"
-            } else {
-                "outs"
-            }
-        }
+        private fun outWord(outs: Int): String = if (outs == 1) "out" else "outs"
 
         private fun basesLabel(bases: Bases): String {
             val occupied = mutableListOf<String>()
-
-            if (bases.first != null) {
-                occupied.add("1B")
-            }
-
-            if (bases.second != null) {
-                occupied.add("2B")
-            }
-
-            if (bases.third != null) {
-                occupied.add("3B")
-            }
-
-            return if (occupied.isEmpty()) {
-                "Bases empty"
-            } else {
-                occupied.joinToString(", ")
-            }
+            if (bases.first != null) occupied.add("1B")
+            if (bases.second != null) occupied.add("2B")
+            if (bases.third != null) occupied.add("3B")
+            return if (occupied.isEmpty()) "Bases empty" else occupied.joinToString(", ")
         }
     }
 }

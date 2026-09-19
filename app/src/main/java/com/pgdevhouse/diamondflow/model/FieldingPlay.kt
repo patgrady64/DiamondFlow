@@ -1,5 +1,9 @@
 package com.pgdevhouse.diamondflow.model
 
 data class FieldingPlay(
-    val fielders: List<Int> = emptyList()
+    val putoutPlayerName: String? = null,
+    val assistPlayerNames: List<String> = emptyList(),
+    val errorPlayerName: String? = null,
+    val doublePlay: Boolean = false,
+    val triplePlay: Boolean = false
 )
