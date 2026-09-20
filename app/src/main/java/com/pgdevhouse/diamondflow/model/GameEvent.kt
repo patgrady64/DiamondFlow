@@ -44,9 +44,12 @@ data class GameEvent(
     val scoredPlayerIds: List<Int> = emptyList(),
     val scoredRuns: List<ScoredRun> = emptyList(),
     val putoutPlayerName: String? = null,
+    val putoutPlayerNames: List<String> = emptyList(),
     val assistPlayerNames: List<String> = emptyList(),
     val errorPlayerName: String? = null,
-    val inheritedRunners: Int = 0
+    val fieldingNotation: String? = null,
+    val inheritedRunners: Int = 0,
+    val pitchCountAdjustment: Int = 0
 ) {
     val isPersonnelEvent: Boolean
         get() = type == GameEventType.BATTER_EDIT ||

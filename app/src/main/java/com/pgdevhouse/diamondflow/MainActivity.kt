@@ -2,11 +2,13 @@ package com.pgdevhouse.diamondflow
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -46,6 +48,7 @@ import com.pgdevhouse.diamondflow.model.BattingStats
 import com.pgdevhouse.diamondflow.model.FieldingPlay
 import com.pgdevhouse.diamondflow.model.FieldingStats
 import com.pgdevhouse.diamondflow.model.PitchingStats
+import com.pgdevhouse.diamondflow.model.PitchAction
 import com.pgdevhouse.diamondflow.model.Play
 import com.pgdevhouse.diamondflow.model.PlayAction
 import com.pgdevhouse.diamondflow.model.Player
@@ -102,6 +105,12 @@ private enum class GameView {
 }
 
 private val DEFENSIVE_POSITIONS = listOf("C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "DH")
+
+private data class SmartActionWarning(
+    val title: String,
+    val message: String,
+    val confirmText: String
+)
 
 private data class MidGameSetup(
     val enabled: Boolean = false,
@@ -259,6 +268,11 @@ private fun InningTrackApp() {
         syncAndSave()
     }
 
+    BackHandler(enabled = screen != AppScreen.HOME) {
+        selectedHistoricalGame = null
+        screen = AppScreen.HOME
+    }
+
     when (screen) {
         AppScreen.HOME -> HomeScreen(
             activeGame = gameState.takeIf { activeGamePresent && !it.gameOver },
@@ -322,8 +336,12 @@ private fun InningTrackApp() {
             canRedo = controller.canRedo,
             onBall = { perform { ball() } },
             onStrike = { perform { strike() } },
+            onRemoveBall = { perform { removeCurrentBall() } },
+            onRemoveStrike = { perform { removeCurrentStrike() } },
             onFoul = { perform { foul() } },
             onHitByPitch = { perform { hitByPitch() } },
+            onRemoveRecordedPitch = { eventId -> perform { removeRecordedPitch(eventId) } },
+            onAddRecordedPitch = { endEventId, action -> perform { addPitchToRecordedAtBat(endEventId, action) } },
             onRenameCurrentBatter = { name -> perform { renameCurrentBatter(name) } },
             onRenameTeam = { team, name -> perform { renameTeam(team, name) } },
             onRenamePlayer = { playerId, name -> perform { renamePlayer(playerId, name) } },
@@ -341,6 +359,7 @@ private fun InningTrackApp() {
             onPinchRun = { base, name -> perform { pinchRun(base, name) } },
             onPitchingChange = { name -> perform { pitchingChange(name) } },
             onPitchingChangeForTeam = { team, name -> perform { pitchingChange(team, name) } },
+            onSetPitchCount = { team, pitcher, count -> perform { setPitchCount(team, pitcher, count) } },
             onPositionChange = { playerId, position -> perform { positionChange(playerId, position) } },
             onReorderLineup = { team, fromIndex, toIndex -> perform { reorderLineup(team, fromIndex, toIndex) } },
             onSetCurrentBatter = { team, playerId -> perform { setCurrentBatter(team, playerId) } },
@@ -364,6 +383,9 @@ private fun InningTrackApp() {
                 }
             },
             onEditPersonnelEvent = { eventId, value -> perform { editPersonnelEvent(eventId, value) } },
+            onEditRecordedAtBat = { eventId, pitches, action, batterId, pitcher, notation ->
+                perform { editRecordedAtBat(eventId, pitches, action, batterId, pitcher, notation) }
+            },
             onPlay = { action, destinations, outs, fielding ->
                 controller.play(
                     action = action,
@@ -418,6 +440,12 @@ private fun InningTrackApp() {
                         completedGames = completedGameStorage.save(correction.state)
                         selectedHistoricalGame = completedGames.firstOrNull { it.gameId == completed.gameId }
                     },
+                    onEditAtBat = { eventId, pitches, action, batterId, pitcher, notation ->
+                        val correction = GameController((selectedHistoricalGame ?: completed).state)
+                        correction.editRecordedAtBat(eventId, pitches, action, batterId, pitcher, notation)
+                        completedGames = completedGameStorage.save(correction.state)
+                        selectedHistoricalGame = completedGames.firstOrNull { it.gameId == completed.gameId }
+                    },
                     onDeleteEvent = { eventId ->
                         val correction = GameController((selectedHistoricalGame ?: completed).state)
                         correction.deleteRecordedEvent(eventId)
@@ -448,6 +476,10 @@ private fun HomeScreen(
     var showDiscardConfirm by remember { mutableStateOf(false) }
     var showImportConfirm by remember { mutableStateOf(false) }
     var settingsExpanded by remember { mutableStateOf(false) }
+    val activeSummary = activeGame?.let { game ->
+        "${if (game.topOfInning) "Top" else "Bottom"} ${game.currentInning} • ${game.outs} out${if (game.outs == 1) "" else "s"}"
+    } ?: "No game in progress"
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -455,123 +487,175 @@ private fun HomeScreen(
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Spacer(Modifier.height(8.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.Top
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("InningTrack", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Black)
+        Spacer(Modifier.height(4.dp))
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.Top,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("InningTrack", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Black)
+                        Text(
+                            "Baseball scorekeeping",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "Start games fast, keep score live, and review full scorecards in one place.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Box {
+                        OutlinedButton(onClick = { settingsExpanded = true }) {
+                            Text("Settings")
+                        }
+                        DropdownMenu(
+                            expanded = settingsExpanded,
+                            onDismissRequest = { settingsExpanded = false }
+                        ) {
+                            Text(
+                                "Settings",
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                fontWeight = FontWeight.Bold
+                            )
+                            HorizontalDivider()
+                            Text(
+                                "Backup & Restore",
+                                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 4.dp),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Export Backup") },
+                                onClick = {
+                                    settingsExpanded = false
+                                    onExportBackup()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Restore Backup") },
+                                onClick = {
+                                    settingsExpanded = false
+                                    showImportConfirm = true
+                                }
+                            )
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    DashboardMetricCard(
+                        label = "Active Game",
+                        value = if (activeGame == null) "None" else "Live",
+                        supporting = activeSummary,
+                        modifier = Modifier.weight(1f)
+                    )
+                    DashboardMetricCard(
+                        label = "Teams",
+                        value = savedTeams.size.toString(),
+                        supporting = "Saved rosters",
+                        modifier = Modifier.weight(1f)
+                    )
+                    DashboardMetricCard(
+                        label = "History",
+                        value = completedGames.size.toString(),
+                        supporting = "Finished games",
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                if (activeGame == null) {
+                    Button(
+                        onClick = onStartGame,
+                        modifier = Modifier.fillMaxWidth().height(56.dp)
+                    ) {
+                        Text("Start a Game", fontSize = 18.sp)
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Button(
+                            onClick = onContinueGame,
+                            modifier = Modifier.weight(1f).height(56.dp)
+                        ) {
+                            Text("Continue Game", fontSize = 17.sp, textAlign = TextAlign.Center)
+                        }
+                        OutlinedButton(
+                            onClick = { showDiscardConfirm = true },
+                            modifier = Modifier.weight(1f).height(56.dp)
+                        ) {
+                            Text("Discard Game", color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            if (activeGame == null) onStartGame() else showReplaceConfirm = true
+                        },
+                        modifier = Modifier.weight(1f).height(50.dp)
+                    ) {
+                        Text(if (activeGame == null) "Start from Setup" else "Start New Game", textAlign = TextAlign.Center)
+                    }
+                    OutlinedButton(
+                        onClick = onManageTeams,
+                        modifier = Modifier.weight(1f).height(50.dp)
+                    ) {
+                        Text("Teams & Players", textAlign = TextAlign.Center)
+                    }
+                }
+
+                backupMessage?.let {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+                    ) {
+                        Text(
+                            it,
+                            modifier = Modifier.padding(12.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    }
+                }
+            }
+        }
+
+        SectionHeader(
+            title = "Previous Games",
+            subtitle = "Finished games and full scorecards"
+        )
+        if (completedGames.isEmpty()) {
+            Card(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    "Baseball scorekeeping",
-                    style = MaterialTheme.typography.titleMedium,
+                    "Finished games will appear here with their complete scorecards.",
+                    modifier = Modifier.padding(16.dp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            Box {
-                TextButton(onClick = { settingsExpanded = true }) {
-                    Text("Settings")
-                }
-                DropdownMenu(
-                    expanded = settingsExpanded,
-                    onDismissRequest = { settingsExpanded = false }
-                ) {
-                    Text(
-                        "Settings",
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                        fontWeight = FontWeight.Bold
-                    )
-                    HorizontalDivider()
-                    Text(
-                        "Backup & Restore",
-                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 4.dp),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Export Backup") },
-                        onClick = {
-                            settingsExpanded = false
-                            onExportBackup()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Restore Backup") },
-                        onClick = {
-                            settingsExpanded = false
-                            showImportConfirm = true
-                        }
-                    )
-                }
-            }
-        }
-
-        backupMessage?.let {
-            Text(
-                it,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary
-            )
-        }
-
-        Button(
-            onClick = {
-                if (activeGame == null) onStartGame() else showReplaceConfirm = true
-            },
-            modifier = Modifier.fillMaxWidth().height(56.dp)
-        ) {
-            Text("Start a Game", fontSize = 18.sp)
-        }
-
-        OutlinedButton(
-            onClick = onManageTeams,
-            modifier = Modifier.fillMaxWidth().height(52.dp)
-        ) {
-            Text("Teams & Players (${savedTeams.size})")
-        }
-
-        activeGame?.let { game ->
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text("Game in progress", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text(
-                        "${game.awayTeamName} ${game.totalRuns(Team.AWAY)}  •  ${game.homeTeamName} ${game.totalRuns(Team.HOME)}",
-                        style = MaterialTheme.typography.titleLarge
-                    )
-                    Text(
-                        "${if (game.topOfInning) "Top" else "Bottom"} ${game.currentInning} • ${game.outs} out${if (game.outs == 1) "" else "s"}",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    OutlinedButton(onClick = onContinueGame, modifier = Modifier.fillMaxWidth()) {
-                        Text("Continue Game")
-                    }
-                    TextButton(
-                        onClick = { showDiscardConfirm = true },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Discard This Game", color = MaterialTheme.colorScheme.error)
-                    }
-                }
-            }
-        }
-
-        HorizontalDivider()
-        Text("Previous Games", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        if (completedGames.isEmpty()) {
-            Text(
-                "Finished games will appear here with their complete scorecards.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
         } else {
             completedGames.forEach { completed ->
                 val game = completed.state
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(
                         modifier = Modifier.padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Column(modifier = Modifier.weight(1f)) {
@@ -585,7 +669,7 @@ private fun HomeScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-                            Text("FINAL", fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.primary)
+                            AssistChip(onClick = { }, enabled = false, label = { Text("FINAL") })
                         }
                         OutlinedButton(
                             onClick = { onOpenCompletedGame(completed) },
@@ -616,7 +700,6 @@ private fun HomeScreen(
             }
         )
     }
-
 
     if (showDiscardConfirm) {
         AlertDialog(
@@ -659,6 +742,41 @@ private fun HomeScreen(
     }
 }
 
+@Composable
+private fun DashboardMetricCard(
+    label: String,
+    value: String,
+    supporting: String,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(supporting, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun SectionHeader(
+    title: String,
+    subtitle: String? = null
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        subtitle?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
 private fun saveWizardTeamRoster(
     storage: SavedTeamStorage,
     currentTeams: List<SavedTeam>,
@@ -693,6 +811,10 @@ private fun TeamManagementScreen(
     var editing by remember { mutableStateOf<SavedTeam?>(null) }
     var originalName by remember { mutableStateOf("") }
     var deleteCandidate by remember { mutableStateOf<SavedTeam?>(null) }
+
+    BackHandler(enabled = editing == null) {
+        onBack()
+    }
 
     if (editing != null) {
         TeamRosterEditorScreen(
@@ -801,8 +923,19 @@ private fun TeamRosterEditorScreen(
     var playerPositions by remember(initial) {
         mutableStateOf(List(initial.lineupNames.ifEmpty { listOf("") }.size) { index -> initial.lineupPositions.getOrNull(index).orEmpty() })
     }
+    var showDiscardChanges by remember(initial) { mutableStateOf(false) }
+    val initialNamesForEditor = remember(initial) { initial.lineupNames.ifEmpty { listOf("") } }
+    val initialPositionsForEditor = remember(initial) {
+        List(initialNamesForEditor.size) { index -> initial.lineupPositions.getOrNull(index).orEmpty() }
+    }
+    val hasUnsavedChanges = teamName != initial.name || playerNames != initialNamesForEditor || playerPositions != initialPositionsForEditor
 
     fun resizePositions(size: Int, values: List<String>): List<String> = List(size) { index -> values.getOrNull(index).orEmpty() }
+    fun requestCancel() {
+        if (hasUnsavedChanges) showDiscardChanges = true else onCancel()
+    }
+
+    BackHandler { requestCancel() }
 
     Column(
         modifier = Modifier
@@ -812,7 +945,7 @@ private fun TeamRosterEditorScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onCancel) { Text("Cancel") }
+            TextButton(onClick = { requestCancel() }) { Text("Cancel") }
             Text(
                 if (initial.name.isBlank()) "Add Team" else "Edit Team",
                 style = MaterialTheme.typography.headlineSmall,
@@ -898,6 +1031,18 @@ private fun TeamRosterEditorScreen(
             modifier = Modifier.fillMaxWidth()
         ) { Text("Add Player") }
         Spacer(Modifier.height(24.dp))
+    }
+
+    if (showDiscardChanges) {
+        UnsavedChangesDialog(
+            title = "Discard team changes?",
+            message = "You have unsaved changes to this team or roster. Going back now will discard those changes.",
+            onKeepEditing = { showDiscardChanges = false },
+            onDiscard = {
+                showDiscardChanges = false
+                onCancel()
+            }
+        )
     }
 }
 
@@ -1008,6 +1153,24 @@ private fun GameSetupScreen(
         SetupStep.GAME_INFO -> innings != null
         else -> true
     }
+    var showDiscardSetup by remember { mutableStateOf(false) }
+    val hasSetupChanges = stepIndex > 0 ||
+        awayName != "Away" || homeName != "Home" || inningsText != "9" ||
+        awayLineupText.isNotBlank() || homeLineupText.isNotBlank() ||
+        awayPositions != defaultWizardPositions(9) || homePositions != defaultWizardPositions(9) ||
+        gameDate.isNotBlank() || ballpark.isNotBlank() || location.isNotBlank() || notes.isNotBlank() ||
+        awayPitcher.isNotBlank() || homePitcher.isNotBlank() || startInMiddle ||
+        startInningText != "1" || !topOfInning || ballsText != "0" || strikesText != "0" || outsText != "0" ||
+        awayScoresText.isNotBlank() || homeScoresText.isNotBlank() || awayBatterText.isNotBlank() || homeBatterText.isNotBlank() ||
+        firstRunnerId != null || secondRunnerId != null || thirdRunnerId != null
+
+    fun requestExitSetup() {
+        if (hasSetupChanges) showDiscardSetup = true else onCancel()
+    }
+
+    BackHandler {
+        if (stepIndex > 0) stepIndex-- else requestExitSetup()
+    }
 
     Column(
         modifier = Modifier
@@ -1017,7 +1180,7 @@ private fun GameSetupScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onCancel) { Text("Cancel") }
+            TextButton(onClick = { requestExitSetup() }) { Text("Cancel") }
             Text(
                 "New Game",
                 style = MaterialTheme.typography.headlineSmall,
@@ -1170,7 +1333,7 @@ private fun GameSetupScreen(
         Spacer(Modifier.height(4.dp))
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(
-                onClick = { if (stepIndex > 0) stepIndex-- else onCancel() },
+                onClick = { if (stepIndex > 0) stepIndex-- else requestExitSetup() },
                 modifier = Modifier.weight(1f)
             ) {
                 Text(if (stepIndex == 0) "Cancel" else "Back")
@@ -1223,6 +1386,18 @@ private fun GameSetupScreen(
             }
         }
         Spacer(Modifier.height(24.dp))
+    }
+
+    if (showDiscardSetup) {
+        UnsavedChangesDialog(
+            title = "Discard game setup?",
+            message = "You have information in this new-game setup that has not been started as a game. Going back to Home will discard it.",
+            onKeepEditing = { showDiscardSetup = false },
+            onDiscard = {
+                showDiscardSetup = false
+                onCancel()
+            }
+        )
     }
 }
 
@@ -1533,8 +1708,12 @@ private fun GameScreen(
     canRedo: Boolean,
     onBall: () -> Unit,
     onStrike: () -> Unit,
+    onRemoveBall: () -> Unit,
+    onRemoveStrike: () -> Unit,
     onFoul: () -> Unit,
     onHitByPitch: () -> Unit,
+    onRemoveRecordedPitch: (Long) -> Unit,
+    onAddRecordedPitch: (Long, PitchAction) -> Unit,
     onRenameCurrentBatter: (String) -> Unit,
     onRenameTeam: (Team, String) -> Unit,
     onRenamePlayer: (Int, String) -> Unit,
@@ -1543,12 +1722,14 @@ private fun GameScreen(
     onPinchRun: (Base, String) -> Unit,
     onPitchingChange: (String) -> Unit,
     onPitchingChangeForTeam: (Team, String) -> Unit,
+    onSetPitchCount: (Team, String, Int) -> Unit,
     onPositionChange: (Int, String) -> Unit,
     onReorderLineup: (Team, Int, Int) -> Unit,
     onSetCurrentBatter: (Team, Int?) -> Unit,
     onResolveUnknownPlayer: (Team, Int, Int) -> Unit,
     onEditGameSituation: (GameSituationUpdate) -> Unit,
     onEditPersonnelEvent: (Long, String) -> Unit,
+    onEditRecordedAtBat: (Long, List<PitchAction>, PlayAction, Int?, String?, String?) -> Unit,
     onPlay: (PlayAction, Map<Int, Base?>, Int, FieldingPlay?) -> Unit,
     onBaseRunning: (BaseRunningAction, Int?, Base?, String?) -> Unit,
     onUndo: () -> Unit,
@@ -1558,10 +1739,25 @@ private fun GameScreen(
     onHome: () -> Unit
 ) {
     var pendingPlay by remember { mutableStateOf<PlayAction?>(null) }
+    var warningPlay by remember { mutableStateOf<PlayAction?>(null) }
     var showEndConfirm by remember { mutableStateOf(false) }
     var showDiscardConfirm by remember { mutableStateOf(false) }
     var showBaseRunningDialog by remember { mutableStateOf(false) }
     var gameView by remember { mutableStateOf(GameView.SCOREKEEPING) }
+
+    BackHandler {
+        if (gameView != GameView.SCOREKEEPING) gameView = GameView.SCOREKEEPING else onHome()
+    }
+
+    val activePlayWarning = warningPlay?.let { smartWarningForPlay(state, it) }
+
+    fun continuePlay(action: PlayAction) {
+        if (shouldResolveRunners(state, action)) {
+            pendingPlay = action
+        } else {
+            onPlay(action, emptyMap(), action.defaultOuts, null)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -1570,25 +1766,43 @@ private fun GameScreen(
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "InningTrack",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.weight(1f)
-            )
-            TextButton(onClick = onHome) {
-                Text("Home")
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            text = "InningTrack",
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            "${state.awayTeamName} at ${state.homeTeamName}",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            "${if (state.topOfInning) "Top" else "Bottom"} ${state.currentInning} • ${state.outs} out${if (state.outs == 1) "" else "s"}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    OutlinedButton(onClick = onHome) {
+                        Text("Home")
+                    }
+                }
+
+                GameViewSwitcher(
+                    selected = gameView,
+                    onSelected = { gameView = it }
+                )
             }
         }
-
-        GameViewSwitcher(
-            selected = gameView,
-            onSelected = { gameView = it }
-        )
 
         when (gameView) {
             GameView.SCOREKEEPING -> {
@@ -1609,50 +1823,65 @@ private fun GameScreen(
                 } else {
                     GameStatusCard(
                         state = state,
+                        onBall = onBall,
+                        onStrike = onStrike,
+                        onFoul = onFoul,
+                        onRemoveBall = onRemoveBall,
+                        onRemoveStrike = onRemoveStrike,
+                        onRemoveRecordedPitch = onRemoveRecordedPitch,
+                        onAddRecordedPitch = onAddRecordedPitch,
                         onRenameCurrentBatter = onRenameCurrentBatter,
                         onPinchHit = onPinchHit,
                         onPinchRun = onPinchRun,
                         onPitchingChange = onPitchingChange,
+                        onSetPitchCount = onSetPitchCount,
                         onPositionChange = onPositionChange,
-                        onSetCurrentBatter = onSetCurrentBatter
+                        onSetCurrentBatter = onSetCurrentBatter,
+                        onHitByPitch = onHitByPitch,
+                        onAction = { action ->
+                            if (smartWarningForPlay(state, action) != null) {
+                                warningPlay = action
+                            } else {
+                                continuePlay(action)
+                            }
+                        },
+                        onRunnerEvent = { showBaseRunningDialog = true }
                     )
                     DiamondCard(state)
+                    GameManagementCard(
+                        state = state,
+                        onPinchHit = onPinchHit,
+                        onPinchRun = onPinchRun,
+                        onPitchingChange = onPitchingChange,
+                        onPositionChange = onPositionChange
+                    )
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text("Game Actions", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(7.dp)
+                            ) {
+                                OutlinedButton(onClick = onUndo, enabled = canUndo, modifier = Modifier.weight(1f)) { Text("Undo") }
+                                OutlinedButton(onClick = onRedo, enabled = canRedo, modifier = Modifier.weight(1f)) { Text("Redo") }
+                                OutlinedButton(onClick = { showEndConfirm = true }, modifier = Modifier.weight(1f)) { Text("End Game") }
+                            }
+                            TextButton(
+                                onClick = { showDiscardConfirm = true },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Discard Game", color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
                     if (LineupEngine.currentBatter(state) == null) {
                         MissingCurrentBatterCard(
                             state = state,
                             onSetCurrentBatter = onSetCurrentBatter
                         )
-                    } else {
-                    ScoringControls(
-                        state = state,
-                        onBall = onBall,
-                        onStrike = onStrike,
-                        onFoul = onFoul,
-                        onHitByPitch = onHitByPitch,
-                        onAction = { action ->
-                            if (shouldResolveRunners(state, action)) {
-                                pendingPlay = action
-                            } else {
-                                onPlay(action, emptyMap(), action.defaultOuts, null)
-                            }
-                        },
-                        onRunnerEvent = { showBaseRunningDialog = true }
-                    )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(7.dp)
-                    ) {
-                        OutlinedButton(onClick = onUndo, enabled = canUndo, modifier = Modifier.weight(1f)) { Text("Undo") }
-                        OutlinedButton(onClick = onRedo, enabled = canRedo, modifier = Modifier.weight(1f)) { Text("Redo") }
-                        OutlinedButton(onClick = { showEndConfirm = true }, modifier = Modifier.weight(1f)) { Text("End Game") }
-                    }
-                    TextButton(
-                        onClick = { showDiscardConfirm = true },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Discard Game", color = MaterialTheme.colorScheme.error)
                     }
                 }
             }
@@ -1678,11 +1907,38 @@ private fun GameScreen(
                 onEditGameSituation = onEditGameSituation,
                 onEditPersonnelEvent = onEditPersonnelEvent
             )
-            GameView.SCORECARD -> FullScorecardScreen(state)
+            GameView.SCORECARD -> FullScorecardScreen(
+                state = state,
+                onEditAtBat = onEditRecordedAtBat
+            )
             GameView.STATS -> LiveStatsScreen(state)
         }
 
         Spacer(Modifier.height(18.dp))
+    }
+
+    if (warningPlay != null && activePlayWarning != null) {
+        AlertDialog(
+            onDismissRequest = { warningPlay = null },
+            title = { Text(activePlayWarning.title) },
+            text = { Text(activePlayWarning.message) },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val action = warningPlay
+                        warningPlay = null
+                        if (action != null) continuePlay(action)
+                    }
+                ) {
+                    Text(activePlayWarning.confirmText)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { warningPlay = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 
     pendingPlay?.let { action ->
@@ -1712,7 +1968,7 @@ private fun GameScreen(
         AlertDialog(
             onDismissRequest = { showEndConfirm = false },
             title = { Text("End this game?") },
-            text = { Text("The current score will be saved as the final score. You can still start a new game afterward.") },
+            text = { Text(smartEndGameMessage(state)) },
             confirmButton = {
                 Button(onClick = {
                     showEndConfirm = false
@@ -1728,7 +1984,6 @@ private fun GameScreen(
             }
         )
     }
-
 
     if (showDiscardConfirm) {
         AlertDialog(
@@ -1754,41 +2009,66 @@ private fun GameScreen(
             }
         )
     }
-
 }
-
 
 @Composable
 private fun GameViewSwitcher(
     selected: GameView,
     onSelected: (GameView) -> Unit
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        FilterChip(
-            selected = selected == GameView.SCOREKEEPING,
-            onClick = { onSelected(GameView.SCOREKEEPING) },
-            label = { Text("Scorekeeping") }
-        )
-        FilterChip(
-            selected = selected == GameView.OVERVIEW,
-            onClick = { onSelected(GameView.OVERVIEW) },
-            label = { Text("Game Overview") }
-        )
-        FilterChip(
-            selected = selected == GameView.SCORECARD,
-            onClick = { onSelected(GameView.SCORECARD) },
-            label = { Text("Scorecard") }
-        )
-        FilterChip(
-            selected = selected == GameView.STATS,
-            onClick = { onSelected(GameView.STATS) },
-            label = { Text("Stats") }
-        )
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            GameViewTabButton(
+                label = "Scorekeeping",
+                selected = selected == GameView.SCOREKEEPING,
+                modifier = Modifier.weight(1f),
+                onClick = { onSelected(GameView.SCOREKEEPING) }
+            )
+            GameViewTabButton(
+                label = "Game Overview",
+                selected = selected == GameView.OVERVIEW,
+                modifier = Modifier.weight(1f),
+                onClick = { onSelected(GameView.OVERVIEW) }
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            GameViewTabButton(
+                label = "Scorecard",
+                selected = selected == GameView.SCORECARD,
+                modifier = Modifier.weight(1f),
+                onClick = { onSelected(GameView.SCORECARD) }
+            )
+            GameViewTabButton(
+                label = "Stats",
+                selected = selected == GameView.STATS,
+                modifier = Modifier.weight(1f),
+                onClick = { onSelected(GameView.STATS) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun GameViewTabButton(
+    label: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    if (selected) {
+        Button(onClick = onClick, modifier = modifier) {
+            Text(label, textAlign = TextAlign.Center)
+        }
+    } else {
+        OutlinedButton(onClick = onClick, modifier = modifier) {
+            Text(label, textAlign = TextAlign.Center)
+        }
     }
 }
 
@@ -2547,24 +2827,49 @@ private fun InningCell(text: String, header: Boolean = false) {
 @Composable
 private fun GameStatusCard(
     state: GameState,
+    onBall: () -> Unit,
+    onStrike: () -> Unit,
+    onFoul: () -> Unit,
+    onRemoveBall: () -> Unit,
+    onRemoveStrike: () -> Unit,
+    onRemoveRecordedPitch: (Long) -> Unit,
+    onAddRecordedPitch: (Long, PitchAction) -> Unit,
     onRenameCurrentBatter: (String) -> Unit,
     onPinchHit: (String) -> Unit,
     onPinchRun: (Base, String) -> Unit,
     onPitchingChange: (String) -> Unit,
+    onSetPitchCount: (Team, String, Int) -> Unit,
     onPositionChange: (Int, String) -> Unit,
-    onSetCurrentBatter: (Team, Int?) -> Unit
+    onSetCurrentBatter: (Team, Int?) -> Unit,
+    onHitByPitch: () -> Unit,
+    onAction: (PlayAction) -> Unit,
+    onRunnerEvent: () -> Unit
 ) {
     val half = if (state.topOfInning) "Top" else "Bottom"
     val batter = LineupEngine.currentBatter(state)
     val fieldingTeam = if (state.activeTeam == Team.AWAY) Team.HOME else Team.AWAY
     val currentPitcher = state.pitcherName(fieldingTeam)
+    val currentPitchCount = remember(
+        state.events,
+        state.awayPitcherName,
+        state.homePitcherName,
+        fieldingTeam,
+        currentPitcher
+    ) {
+        GameStats.pitching(state, fieldingTeam)
+            .lastOrNull { it.pitcherName == currentPitcher }
+            ?.pitches
+            ?: 0
+    }
 
     var showEditBatter by remember { mutableStateOf(false) }
     var showPinchHitter by remember { mutableStateOf(false) }
     var showPinchRunner by remember { mutableStateOf(false) }
     var showPitchingChange by remember { mutableStateOf(false) }
+    var showPitchCountEditor by remember { mutableStateOf(false) }
     var showPositionChange by remember { mutableStateOf(false) }
     var showBatterPicker by remember { mutableStateOf(false) }
+    var showPitchHistory by remember { mutableStateOf(false) }
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -2602,58 +2907,125 @@ private fun GameStatusCard(
                 }
             }
 
-            Text(
-                text = "Pitcher: $currentPitcher",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            TextButton(
+                onClick = { showPitchCountEditor = true },
+                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp)
+            ) {
+                Text(
+                    text = "Pitcher: $currentPitcher - $currentPitchCount ${if (currentPitchCount == 1) "pitch" else "pitches"}  •  Edit",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium
+                )
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.Top
             ) {
-                StatusPill("Balls", state.balls, 3)
-                StatusPill("Strikes", state.strikes, 2)
-                StatusPill("Outs", state.outs, 2)
-            }
-
-            HorizontalDivider()
-            Text("Game management", fontWeight = FontWeight.SemiBold)
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedButton(
-                    onClick = { showPinchHitter = true },
-                    enabled = batter != null && batter.id >= 0,
+                CountAdjuster(
+                    label = "Balls",
+                    value = state.balls,
+                    max = 3,
+                    onAdd = onBall,
+                    onRemove = onRemoveBall,
                     modifier = Modifier.weight(1f)
-                ) {
-                    Text("Pinch Hitter", textAlign = TextAlign.Center)
-                }
-                OutlinedButton(
-                    onClick = { showPinchRunner = true },
-                    enabled = !state.bases.isEmpty(),
+                )
+                CountAdjuster(
+                    label = "Strikes",
+                    value = state.strikes,
+                    max = 2,
+                    onAdd = onStrike,
+                    onRemove = onRemoveStrike,
                     modifier = Modifier.weight(1f)
+                )
+                Column(
+                    modifier = Modifier.weight(1f),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text("Pinch Runner", textAlign = TextAlign.Center)
+                    OutlinedButton(
+                        onClick = onFoul,
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 12.dp)
+                    ) {
+                        Text("Foul", fontWeight = FontWeight.SemiBold)
+                    }
+                    Text(
+                        "Add pitch",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                StatusPill("Outs", state.outs, 2, Modifier.weight(1f))
+            }
+
+            if (batter != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    PlayMenuButton(
+                        label = "Reached Base",
+                        modifier = Modifier.weight(1f),
+                        actions = listOf(
+                            "Single" to { onAction(PlayAction.SINGLE) },
+                            "Double" to { onAction(PlayAction.DOUBLE) },
+                            "Triple" to { onAction(PlayAction.TRIPLE) },
+                            "Home Run" to { onAction(PlayAction.HOME_RUN) },
+                            "Walk" to { onAction(PlayAction.WALK) },
+                            "Intentional Walk" to { onAction(PlayAction.INTENTIONAL_WALK) },
+                            "HBP" to onHitByPitch,
+                            "Error" to { onAction(PlayAction.ERROR) }
+                        )
+                    )
+                    PlayMenuButton(
+                        label = "Out / Other",
+                        modifier = Modifier.weight(1f),
+                        actions = listOf(
+                            "Strikeout" to { onAction(PlayAction.STRIKEOUT) },
+                            "Ground Out" to { onAction(PlayAction.GROUND_OUT) },
+                            "Fly Out" to { onAction(PlayAction.FLY_OUT) },
+                            "Fielder's Choice" to { onAction(PlayAction.FIELDERS_CHOICE) },
+                            "Sac Bunt" to { onAction(PlayAction.SACRIFICE_BUNT) },
+                            "Sac Fly" to { onAction(PlayAction.SACRIFICE_FLY) },
+                            "Double Play" to { onAction(PlayAction.DOUBLE_PLAY) },
+                            "Triple Play" to { onAction(PlayAction.TRIPLE_PLAY) },
+                            "Runner Event" to onRunnerEvent
+                        )
+                    )
                 }
             }
 
-            OutlinedButton(
-                onClick = { showPitchingChange = true },
-                modifier = Modifier.fillMaxWidth()
+            TextButton(
+                onClick = { showPitchHistory = true },
+                enabled = completedPlateAppearancePitchHistory(state).isNotEmpty(),
+                modifier = Modifier.align(Alignment.End)
             ) {
-                Text("Pitching Change")
+                Text("Edit previous at-bat pitches")
             }
 
-            OutlinedButton(
-                onClick = { showPositionChange = true },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Position Change")
-            }
         }
+    }
+
+    if (showPitchCountEditor) {
+        PitchCountEditorDialog(
+            pitcherName = currentPitcher,
+            currentCount = currentPitchCount,
+            onDismiss = { showPitchCountEditor = false },
+            onSave = { count ->
+                onSetPitchCount(fieldingTeam, currentPitcher, count)
+                showPitchCountEditor = false
+            }
+        )
+    }
+
+    if (showPitchHistory) {
+        PreviousAtBatPitchDialog(
+            state = state,
+            onDismiss = { showPitchHistory = false },
+            onRemovePitch = onRemoveRecordedPitch,
+            onAddPitch = onAddRecordedPitch
+        )
     }
 
     if (showBatterPicker) {
@@ -2737,6 +3109,33 @@ private fun GameStatusCard(
 }
 
 @Composable
+private fun UnsavedChangesDialog(
+    title: String,
+    message: String,
+    onKeepEditing: () -> Unit,
+    onDiscard: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onKeepEditing,
+        title = { Text(title) },
+        text = { Text(message) },
+        confirmButton = {
+            Button(
+                onClick = onDiscard,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+            ) {
+                Text("Discard Changes")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onKeepEditing) {
+                Text("Keep Editing")
+            }
+        }
+    )
+}
+
+@Composable
 private fun NameEntryDialog(
     title: String,
     label: String,
@@ -2747,10 +3146,16 @@ private fun NameEntryDialog(
     onConfirm: (String) -> Unit
 ) {
     var name by remember(title, initialValue) { mutableStateOf(initialValue) }
+    var showDiscardChanges by remember(title, initialValue) { mutableStateOf(false) }
     val trimmed = name.trim()
+    val hasUnsavedChanges = name != initialValue
+
+    fun requestDismiss() {
+        if (hasUnsavedChanges) showDiscardChanges = true else onDismiss()
+    }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { requestDismiss() },
         title = { Text(title) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2780,11 +3185,23 @@ private fun NameEntryDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = { requestDismiss() }) {
                 Text("Cancel")
             }
         }
     )
+
+    if (showDiscardChanges) {
+        UnsavedChangesDialog(
+            title = "Discard changes?",
+            message = "You changed this value but have not saved it. Going back now will discard your edit.",
+            onKeepEditing = { showDiscardChanges = false },
+            onDiscard = {
+                showDiscardChanges = false
+                onDismiss()
+            }
+        )
+    }
 }
 
 @Composable
@@ -2856,9 +3273,340 @@ private fun PinchRunnerDialog(
     )
 }
 
+private data class PlateAppearancePitchHistory(
+    val endEventId: Long,
+    val inning: Int,
+    val topOfInning: Boolean,
+    val batterName: String,
+    val result: String,
+    val pitches: List<GameEvent>
+)
+
+private fun completedPlateAppearancePitchHistory(state: GameState): List<PlateAppearancePitchHistory> {
+    val result = mutableListOf<PlateAppearancePitchHistory>()
+    val pendingPitches = mutableListOf<GameEvent>()
+
+    state.events.forEach { event ->
+        if (event.type == GameEventType.PITCH) pendingPitches += event
+        val completesPlateAppearance = event.playAction != null &&
+            (event.type == GameEventType.PLAY || event.type == GameEventType.PITCH)
+        if (completesPlateAppearance) {
+            result += PlateAppearancePitchHistory(
+                endEventId = event.id,
+                inning = event.inning,
+                topOfInning = event.topOfInning,
+                batterName = event.actorName ?: state.playerName(event.actorPlayerId ?: Int.MIN_VALUE) ?: "Unknown",
+                result = event.title,
+                pitches = pendingPitches.toList()
+            )
+            pendingPitches.clear()
+        }
+    }
+    return result
+}
+
 @Composable
-private fun StatusPill(label: String, value: Int, max: Int) {
+private fun CountAdjuster(
+    label: String,
+    value: Int,
+    max: Int,
+    onAdd: () -> Unit,
+    onRemove: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        OutlinedButton(
+            onClick = onAdd,
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(value.coerceAtMost(max).toString(), fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text(label, style = MaterialTheme.typography.labelMedium)
+            }
+        }
+        TextButton(
+            onClick = onRemove,
+            enabled = value > 0,
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+        ) {
+            Text("− 1 $label", style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+@Composable
+private fun PitchCountEditorDialog(
+    pitcherName: String,
+    currentCount: Int,
+    onDismiss: () -> Unit,
+    onSave: (Int) -> Unit
+) {
+    var value by remember(pitcherName, currentCount) { mutableStateOf(currentCount.toString()) }
+    var showDiscardChanges by remember(pitcherName, currentCount) { mutableStateOf(false) }
+    val parsed = value.toIntOrNull()?.coerceIn(0, 999)
+    val hasUnsavedChanges = value != currentCount.toString()
+
+    fun requestDismiss() {
+        if (hasUnsavedChanges) showDiscardChanges = true else onDismiss()
+    }
+
+    AlertDialog(
+        onDismissRequest = { requestDismiss() },
+        title = { Text("Edit pitch count") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "$pitcherName currently has $currentCount ${if (currentCount == 1) "pitch" else "pitches"}. Enter the correct total.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { input -> value = input.filter(Char::isDigit).take(3) },
+                    label = { Text("Total pitches") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    "This adjusts the pitch total without inventing a ball or strike. New pitches will continue counting from the corrected total.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { parsed?.let(onSave) },
+                enabled = parsed != null
+            ) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = { requestDismiss() }) { Text("Cancel") } }
+    )
+
+    if (showDiscardChanges) {
+        UnsavedChangesDialog(
+            title = "Discard pitch-count change?",
+            message = "The corrected pitch count has not been saved. Going back now will discard it.",
+            onKeepEditing = { showDiscardChanges = false },
+            onDiscard = {
+                showDiscardChanges = false
+                onDismiss()
+            }
+        )
+    }
+}
+
+@Composable
+private fun PreviousAtBatPitchDialog(
+    state: GameState,
+    onDismiss: () -> Unit,
+    onRemovePitch: (Long) -> Unit,
+    onAddPitch: (Long, PitchAction) -> Unit
+) {
+    val history = completedPlateAppearancePitchHistory(state)
+    var selectedIndex by remember(history.size) { mutableStateOf((history.lastIndex).coerceAtLeast(0)) }
+    var expanded by remember { mutableStateOf(false) }
+    val selected = history.getOrNull(selectedIndex)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Edit previous at-bat pitches") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "Choose an earlier plate appearance, then add or remove recorded pitches. The at-bat result stays unchanged.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                if (history.isEmpty()) {
+                    Text("No completed at-bats have been recorded yet.")
+                } else if (selected != null) {
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = { expanded = true },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                "${if (selected.topOfInning) "Top" else "Bottom"} ${selected.inning} • ${selected.batterName} • ${selected.result}",
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = expanded,
+                            onDismissRequest = { expanded = false }
+                        ) {
+                            history.asReversed().forEachIndexed { reversedIndex, atBat ->
+                                val actualIndex = history.lastIndex - reversedIndex
+                                DropdownMenuItem(
+                                    text = {
+                                        Text("${if (atBat.topOfInning) "Top" else "Bottom"} ${atBat.inning} • ${atBat.batterName} • ${atBat.result}")
+                                    },
+                                    onClick = {
+                                        selectedIndex = actualIndex
+                                        expanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    Text("Recorded pitches", fontWeight = FontWeight.SemiBold)
+                    if (selected.pitches.isEmpty()) {
+                        Text(
+                            "No individual pitches are recorded for this at-bat.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        selected.pitches.forEachIndexed { index, pitch ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "${index + 1}. ${pitch.title}",
+                                    modifier = Modifier.weight(1f)
+                                )
+                                TextButton(onClick = { onRemovePitch(pitch.id) }) {
+                                    Text("Remove")
+                                }
+                            }
+                        }
+                    }
+
+                    Text("Add missed pitch", fontWeight = FontWeight.SemiBold)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { onAddPitch(selected.endEventId, PitchAction.BALL) },
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 6.dp)
+                        ) { Text("Ball") }
+                        OutlinedButton(
+                            onClick = { onAddPitch(selected.endEventId, PitchAction.STRIKE) },
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 6.dp)
+                        ) { Text("Strike") }
+                        OutlinedButton(
+                            onClick = { onAddPitch(selected.endEventId, PitchAction.FOUL) },
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 6.dp)
+                        ) { Text("Foul") }
+                    }
+                    OutlinedButton(
+                        onClick = { onAddPitch(selected.endEventId, PitchAction.IN_PLAY) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Ball in play") }
+
+                    Text(
+                        "Removing a result pitch such as Ball 4 or Strike 3 corrects the pitch count but keeps the walk or strikeout in the scorebook.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } }
+    )
+}
+
+@Composable
+private fun GameManagementCard(
+    state: GameState,
+    onPinchHit: (String) -> Unit,
+    onPinchRun: (Base, String) -> Unit,
+    onPitchingChange: (String) -> Unit,
+    onPositionChange: (Int, String) -> Unit
+) {
+    val batter = LineupEngine.currentBatter(state)
+    val fieldingTeam = if (state.activeTeam == Team.AWAY) Team.HOME else Team.AWAY
+    val currentPitcher = state.pitcherName(fieldingTeam)
+    var showPinchHitter by remember { mutableStateOf(false) }
+    var showPinchRunner by remember { mutableStateOf(false) }
+    var showPitchingChange by remember { mutableStateOf(false) }
+    var showPositionChange by remember { mutableStateOf(false) }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text("Game Management", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = { showPinchHitter = true },
+                    enabled = batter != null && batter.id >= 0,
+                    modifier = Modifier.weight(1f)
+                ) { Text("Pinch Hitter", textAlign = TextAlign.Center) }
+                OutlinedButton(
+                    onClick = { showPinchRunner = true },
+                    enabled = !state.bases.isEmpty(),
+                    modifier = Modifier.weight(1f)
+                ) { Text("Pinch Runner", textAlign = TextAlign.Center) }
+            }
+            OutlinedButton(onClick = { showPitchingChange = true }, modifier = Modifier.fillMaxWidth()) {
+                Text("Pitching Change")
+            }
+            OutlinedButton(onClick = { showPositionChange = true }, modifier = Modifier.fillMaxWidth()) {
+                Text("Position Change")
+            }
+        }
+    }
+
+    if (showPinchHitter && batter != null) {
+        NameEntryDialog(
+            title = "Pinch hitter",
+            label = "New hitter name",
+            confirmText = "Substitute",
+            supportingText = "${batter.name} will be replaced in this batting-order spot for the rest of the game.",
+            onDismiss = { showPinchHitter = false },
+            onConfirm = { name -> showPinchHitter = false; onPinchHit(name) }
+        )
+    }
+    if (showPinchRunner) {
+        PinchRunnerDialog(
+            state = state,
+            onDismiss = { showPinchRunner = false },
+            onConfirm = { base, name -> showPinchRunner = false; onPinchRun(base, name) }
+        )
+    }
+    if (showPitchingChange) {
+        NameEntryDialog(
+            title = "Pitching change",
+            label = "New pitcher name",
+            initialValue = currentPitcher,
+            confirmText = "Make Change",
+            supportingText = "Changing pitcher for ${state.teamName(fieldingTeam)}.",
+            onDismiss = { showPitchingChange = false },
+            onConfirm = { name -> showPitchingChange = false; onPitchingChange(name) }
+        )
+    }
+    if (showPositionChange) {
+        PositionChangeDialog(
+            state = state,
+            onDismiss = { showPositionChange = false },
+            onConfirm = { playerId, position -> showPositionChange = false; onPositionChange(playerId, position) }
+        )
+    }
+}
+
+@Composable
+private fun StatusPill(label: String, value: Int, max: Int, modifier: Modifier = Modifier) {
     Surface(
+        modifier = modifier,
         shape = RoundedCornerShape(12.dp),
         tonalElevation = 2.dp
     ) {
@@ -2986,71 +3734,32 @@ private fun runnerName(state: GameState, playerId: Int?): String? {
 }
 
 @Composable
-private fun ScoringControls(
-    state: GameState,
-    onBall: () -> Unit,
-    onStrike: () -> Unit,
-    onFoul: () -> Unit,
-    onHitByPitch: () -> Unit,
-    onAction: (PlayAction) -> Unit,
-    onRunnerEvent: () -> Unit
+private fun PlayMenuButton(
+    label: String,
+    modifier: Modifier = Modifier,
+    actions: List<Pair<String, () -> Unit>>
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(9.dp)
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier = modifier) {
+        Button(
+            onClick = { expanded = true },
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Pitch", fontWeight = FontWeight.Bold)
-            ActionRow(
-                listOf(
-                    "Ball" to onBall,
-                    "Strike" to onStrike,
-                    "Foul" to onFoul,
-                    "HBP" to onHitByPitch
+            Text("$label ▾", textAlign = TextAlign.Center)
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            actions.forEach { (itemLabel, action) ->
+                DropdownMenuItem(
+                    text = { Text(itemLabel) },
+                    onClick = {
+                        expanded = false
+                        action()
+                    }
                 )
-            )
-
-            Text("Hit", fontWeight = FontWeight.Bold)
-            ActionRow(
-                listOf(
-                    "Single" to { onAction(PlayAction.SINGLE) },
-                    "Double" to { onAction(PlayAction.DOUBLE) },
-                    "Triple" to { onAction(PlayAction.TRIPLE) },
-                    "Home Run" to { onAction(PlayAction.HOME_RUN) }
-                )
-            )
-
-            Text("Plate appearance", fontWeight = FontWeight.Bold)
-            ActionRow(
-                listOf(
-                    "Strikeout" to { onAction(PlayAction.STRIKEOUT) },
-                    "Walk" to { onAction(PlayAction.WALK) },
-                    "IBB" to { onAction(PlayAction.INTENTIONAL_WALK) },
-                    "Error" to { onAction(PlayAction.ERROR) }
-                )
-            )
-            ActionRow(
-                listOf(
-                    "Ground Out" to { onAction(PlayAction.GROUND_OUT) },
-                    "Fly Out" to { onAction(PlayAction.FLY_OUT) },
-                    "Fielder's Choice" to { onAction(PlayAction.FIELDERS_CHOICE) },
-                    "Sac Bunt" to { onAction(PlayAction.SACRIFICE_BUNT) }
-                )
-            )
-            ActionRow(
-                listOf(
-                    "Sac Fly" to { onAction(PlayAction.SACRIFICE_FLY) },
-                    "Double Play" to { onAction(PlayAction.DOUBLE_PLAY) },
-                    "Triple Play" to { onAction(PlayAction.TRIPLE_PLAY) },
-                    "Runner Event" to onRunnerEvent
-                )
-            )
-
-            Text(
-                text = "Runner Event records steals, caught stealing, pickoffs, wild pitches, passed balls, balks and other advances without advancing the batting order.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            }
         }
     }
 }
@@ -3114,7 +3823,17 @@ private fun RunnerResolutionDialog(
     var putoutName by remember(state, action) { mutableStateOf<String?>(null) }
     var errorName by remember(state, action) { mutableStateOf<String?>(null) }
     var assistNames by remember(state, action) { mutableStateOf<Set<String>>(emptySet()) }
+    var fieldingSequence by remember(state, action) { mutableStateOf<List<DefensiveFielder>>(emptyList()) }
     val fieldingNames = remember(state) { defensivePlayerNames(state) }
+    val fieldingPositions = remember(state) { defensivePlayerPositions(state) }
+    val defensiveFielderOptions = remember(state) { defensiveFielders(state) }
+    val usesScorebookSequence = action in setOf(
+        PlayAction.GROUND_OUT,
+        PlayAction.FLY_OUT,
+        PlayAction.SACRIFICE_FLY,
+        PlayAction.DOUBLE_PLAY,
+        PlayAction.TRIPLE_PLAY
+    )
 
     val duplicateBase = listOf(Base.FIRST, Base.SECOND, Base.THIRD).any { base ->
         destinations.values.count { it == base } > 1
@@ -3129,6 +3848,54 @@ private fun RunnerResolutionDialog(
         PlayAction.DOUBLE_PLAY,
         PlayAction.TRIPLE_PLAY
     )
+    val sequenceRequired = usesScorebookSequence && defensiveFielderOptions.isNotEmpty()
+    val fieldingSequenceReady = !sequenceRequired || when (action) {
+        PlayAction.FLY_OUT, PlayAction.SACRIFICE_FLY -> fieldingSequence.size == 1
+        PlayAction.DOUBLE_PLAY -> fieldingSequence.size >= 2
+        PlayAction.TRIPLE_PLAY -> fieldingSequence.size >= 3
+        else -> fieldingSequence.isNotEmpty()
+    }
+    var showResolutionWarning by remember(state, action) { mutableStateOf(false) }
+    val resolutionWarnings = smartResolutionWarnings(
+        state = state,
+        action = action,
+        batterId = batterId,
+        destinations = destinations,
+        outsRecorded = outsRecorded
+    )
+
+    fun commitResolvedPlay() {
+        val sequencePutout = fieldingSequence.lastOrNull()?.name
+        val sequencePutouts = if (fieldingSequence.isNotEmpty()) {
+            val putoutCount = when (action) {
+                PlayAction.DOUBLE_PLAY -> 2
+                PlayAction.TRIPLE_PLAY -> 3
+                else -> 1
+            }
+            fieldingSequence.takeLast(putoutCount.coerceAtMost(fieldingSequence.size))
+                .map { it.name }
+                .distinct()
+        } else emptyList()
+        val sequenceAssists = if (fieldingSequence.size > 1) {
+            fieldingSequence.dropLast(1).map { it.name }.distinct()
+        } else emptyList()
+        val notation = if (fieldingSequence.isNotEmpty()) {
+            scorebookFieldingNotation(action, fieldingSequence.map { it.number })
+        } else null
+        val fielding = FieldingPlay(
+            putoutPlayerName = sequencePutout ?: putoutName,
+            putoutPlayerNames = if (fieldingSequence.isNotEmpty()) sequencePutouts else listOfNotNull(putoutName),
+            assistPlayerNames = if (fieldingSequence.isNotEmpty()) sequenceAssists else assistNames.toList(),
+            errorPlayerName = errorName,
+            fieldingNotation = notation,
+            doublePlay = action == PlayAction.DOUBLE_PLAY,
+            triplePlay = action == PlayAction.TRIPLE_PLAY
+        ).takeIf {
+            it.putoutPlayerName != null || it.putoutPlayerNames.isNotEmpty() || it.assistPlayerNames.isNotEmpty() ||
+                it.errorPlayerName != null || it.fieldingNotation != null || it.doublePlay || it.triplePlay
+        }
+        onCommit(destinations, outsRecorded, fielding)
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -3156,7 +3923,7 @@ private fun RunnerResolutionDialog(
                             modifier = Modifier.horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            destinationChoices.forEach { (label, base) ->
+                            validDestinationChoices(state, playerId, batterId).forEach { (label, base) ->
                                 FilterChip(
                                     selected = destination == base,
                                     onClick = {
@@ -3190,28 +3957,122 @@ private fun RunnerResolutionDialog(
                         onSelected = { errorName = it }
                     )
                 } else if (needsOutCredit) {
-                    Text("Fielding credit (optional)", fontWeight = FontWeight.SemiBold)
-                    SimpleNameDropdown(
-                        label = "Putout",
-                        names = fieldingNames,
-                        selected = putoutName,
-                        allowNone = true,
-                        onSelected = { putoutName = it }
-                    )
-                    if (fieldingNames.isNotEmpty()) {
-                        Text("Assists", style = MaterialTheme.typography.labelLarge)
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            fieldingNames.forEach { name ->
-                                FilterChip(
-                                    selected = name in assistNames,
-                                    onClick = {
-                                        assistNames = if (name in assistNames) assistNames - name else assistNames + name
-                                    },
-                                    label = { Text(name) }
+                    if (usesScorebookSequence && defensiveFielderOptions.isNotEmpty()) {
+                        val sequenceNumbers = fieldingSequence.map { it.number }
+                        val notation = scorebookFieldingNotation(action, sequenceNumbers)
+                        Text(
+                            when (action) {
+                                PlayAction.FLY_OUT, PlayAction.SACRIFICE_FLY -> "Who caught it?"
+                                PlayAction.DOUBLE_PLAY -> "Double-play fielding sequence"
+                                PlayAction.TRIPLE_PLAY -> "Triple-play fielding sequence"
+                                else -> "Ground-out fielding sequence"
+                            },
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            when (action) {
+                                PlayAction.FLY_OUT, PlayAction.SACRIFICE_FLY ->
+                                    "Tap the fielder who made the catch. The scorecard will show F8, F7, etc."
+                                PlayAction.DOUBLE_PLAY ->
+                                    "Tap fielders in order from the first touch through the second out. Example: 3B, 2B, 1B becomes 5-4-3 DP."
+                                PlayAction.TRIPLE_PLAY ->
+                                    "Tap fielders in order through all three outs."
+                                else ->
+                                    "Tap fielders in order. Example: SS then 1B becomes 6-3."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        ScorebookFieldingDiamond(
+                            fielders = defensiveFielderOptions,
+                            sequence = fieldingSequence,
+                            onFielderTap = { fielder ->
+                                fieldingSequence = if (action in setOf(PlayAction.FLY_OUT, PlayAction.SACRIFICE_FLY)) {
+                                    listOf(fielder)
+                                } else {
+                                    fieldingSequence + fielder
+                                }
+                            }
+                        )
+
+                        if (fieldingSequence.isNotEmpty()) {
+                            Text(
+                                "Scorecard: $notation",
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            if (action == PlayAction.DOUBLE_PLAY && fieldingSequence.size >= 2) {
+                                val firstOut = if (fieldingSequence.size == 2) {
+                                    "${fieldingSequence[0].number} unassisted"
+                                } else {
+                                    "${fieldingSequence[0].number}-${fieldingSequence[1].number}"
+                                }
+                                val secondOut = if (fieldingSequence.size == 2) {
+                                    "${fieldingSequence[0].number}-${fieldingSequence[1].number}"
+                                } else {
+                                    "${fieldingSequence[1].number}-${fieldingSequence[2].number}"
+                                }
+                                Text(
+                                    "First out: $firstOut  •  Second out: $secondOut",
+                                    style = MaterialTheme.typography.bodySmall
                                 )
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                if (action !in setOf(PlayAction.FLY_OUT, PlayAction.SACRIFICE_FLY)) {
+                                    TextButton(onClick = { fieldingSequence = fieldingSequence.dropLast(1) }) {
+                                        Text("Undo last fielder")
+                                    }
+                                }
+                                TextButton(onClick = { fieldingSequence = emptyList() }) { Text("Clear") }
+                            }
+                        }
+                    } else {
+                        Text("Fielding credit (optional)", fontWeight = FontWeight.SemiBold)
+                        SimpleNameDropdown(
+                            label = "Putout",
+                            names = fieldingNames,
+                            selected = putoutName,
+                            allowNone = true,
+                            onSelected = { putoutName = it },
+                            displayName = { name ->
+                                fieldingPositions[name]
+                                    ?.takeIf(String::isNotBlank)
+                                    ?.let { position -> "$position — $name" }
+                                    ?: name
+                            }
+                        )
+                        if (fieldingNames.isNotEmpty()) {
+                            Text("Assists", style = MaterialTheme.typography.labelLarge)
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                fieldingNames.forEach { name ->
+                                    FilterChip(
+                                        selected = name in assistNames,
+                                        onClick = {
+                                            assistNames = if (name in assistNames) assistNames - name else assistNames + name
+                                        },
+                                        label = {
+                                            val position = fieldingPositions[name]
+                                            Text(if (position.isNullOrBlank()) name else "$position — $name")
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
+                }
+
+                if (sequenceRequired && !fieldingSequenceReady) {
+                    Text(
+                        when (action) {
+                            PlayAction.FLY_OUT, PlayAction.SACRIFICE_FLY -> "Choose the fielder who made the catch."
+                            PlayAction.DOUBLE_PLAY -> "Enter the fielding sequence for both outs."
+                            PlayAction.TRIPLE_PLAY -> "Enter the fielding sequence for all three outs."
+                            else -> "Enter the fielder or fielding sequence for the out."
+                        },
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
                 }
 
                 if (duplicateBase) {
@@ -3226,24 +4087,36 @@ private fun RunnerResolutionDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val fielding = FieldingPlay(
-                        putoutPlayerName = putoutName,
-                        assistPlayerNames = assistNames.toList(),
-                        errorPlayerName = errorName,
-                        doublePlay = action == PlayAction.DOUBLE_PLAY,
-                        triplePlay = action == PlayAction.TRIPLE_PLAY
-                    ).takeIf {
-                        it.putoutPlayerName != null || it.assistPlayerNames.isNotEmpty() || it.errorPlayerName != null || it.doublePlay || it.triplePlay
+                    if (resolutionWarnings.isNotEmpty()) {
+                        showResolutionWarning = true
+                    } else {
+                        commitResolvedPlay()
                     }
-                    onCommit(destinations, outsRecorded, fielding)
                 },
-                enabled = !duplicateBase
+                enabled = !duplicateBase && fieldingSequenceReady
             ) {
                 Text("Record Play")
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
+
+    if (showResolutionWarning && resolutionWarnings.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { showResolutionWarning = false },
+            title = { Text("Check this play") },
+            text = { Text(resolutionWarnings.joinToString("\n\n") { "• $it" }) },
+            confirmButton = {
+                Button(onClick = {
+                    showResolutionWarning = false
+                    commitResolvedPlay()
+                }) { Text("Record Anyway") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResolutionWarning = false }) { Text("Go Back") }
+            }
+        )
+    }
 }
 
 private fun defensivePlayerNames(state: GameState): List<String> {
@@ -3254,18 +4127,179 @@ private fun defensivePlayerNames(state: GameState): List<String> {
         .distinct()
 }
 
+private fun defensivePlayerPositions(state: GameState): Map<String, String> {
+    val fieldingTeam = if (state.activeTeam == Team.AWAY) Team.HOME else Team.AWAY
+    val lineup = if (fieldingTeam == Team.AWAY) state.lineupAway else state.lineupHome
+    return buildMap {
+        lineup.forEach { player ->
+            put(player.name, state.playerPosition(player.id).orEmpty())
+        }
+        state.pitcherName(fieldingTeam)
+            .takeIf(String::isNotBlank)
+            ?.let { put(it, "P") }
+    }
+}
+
+private data class DefensiveFielder(
+    val number: Int,
+    val position: String,
+    val name: String
+)
+
+private fun defensiveFielders(state: GameState): List<DefensiveFielder> {
+    val fieldingTeam = if (state.activeTeam == Team.AWAY) Team.HOME else Team.AWAY
+    val lineup = if (fieldingTeam == Team.AWAY) state.lineupAway else state.lineupHome
+    val fielders = lineup.mapNotNull { player ->
+        val position = state.playerPosition(player.id).orEmpty().uppercase()
+        val number = scorebookPositionNumber(position) ?: return@mapNotNull null
+        DefensiveFielder(number, position, player.name)
+    }.toMutableList()
+
+    val pitcherName = state.pitcherName(fieldingTeam).trim()
+    if (pitcherName.isNotEmpty() && fielders.none { it.number == 1 && it.name == pitcherName }) {
+        fielders += DefensiveFielder(1, "P", pitcherName)
+    }
+    return fielders.distinctBy { it.number to it.name }.sortedBy(DefensiveFielder::number)
+}
+
+private fun scorebookPositionNumber(position: String): Int? = when (position.uppercase()) {
+    "P" -> 1
+    "C" -> 2
+    "1B" -> 3
+    "2B" -> 4
+    "3B" -> 5
+    "SS" -> 6
+    "LF" -> 7
+    "CF" -> 8
+    "RF" -> 9
+    else -> null
+}
+
+@Composable
+private fun ScorebookFieldingDiamond(
+    fielders: List<DefensiveFielder>,
+    sequence: List<DefensiveFielder>,
+    onFielderTap: (DefensiveFielder) -> Unit
+) {
+    val byPosition = remember(fielders) { fielders.associateBy { it.position.uppercase() } }
+
+    @Composable
+    fun FielderButton(position: String, modifier: Modifier = Modifier) {
+        val fielder = byPosition[position]
+        if (fielder == null) {
+            Spacer(modifier = modifier.height(56.dp))
+            return
+        }
+        val selectionNumber = sequence.indexOfLast { it.number == fielder.number && it.name == fielder.name }
+            .takeIf { it >= 0 }
+            ?.plus(1)
+        OutlinedButton(
+            onClick = { onFielderTap(fielder) },
+            modifier = modifier.heightIn(min = 56.dp),
+            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(1.dp)
+            ) {
+                Text(
+                    text = "${fielder.number} · ${fielder.position}",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                )
+                Text(
+                    text = fielder.name,
+                    fontSize = 10.sp,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1
+                )
+                if (selectionNumber != null) {
+                    Text(
+                        text = "#$selectionNumber",
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Spacer(Modifier.weight(1f))
+            FielderButton("C", Modifier.weight(1f))
+            Spacer(Modifier.weight(1f))
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            FielderButton("1B", Modifier.weight(1f))
+            FielderButton("P", Modifier.weight(1f))
+            FielderButton("3B", Modifier.weight(1f))
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Spacer(Modifier.weight(1f))
+            FielderButton("2B", Modifier.weight(1f))
+            FielderButton("SS", Modifier.weight(1f))
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            FielderButton("LF", Modifier.weight(1f))
+            FielderButton("CF", Modifier.weight(1f))
+            FielderButton("RF", Modifier.weight(1f))
+        }
+    }
+}
+
+private fun supportsScorebookFieldingNotation(action: PlayAction): Boolean = action in setOf(
+    PlayAction.GROUND_OUT,
+    PlayAction.FLY_OUT,
+    PlayAction.SACRIFICE_FLY,
+    PlayAction.DOUBLE_PLAY,
+    PlayAction.TRIPLE_PLAY
+)
+
+private fun scorebookFieldingNotation(action: PlayAction, numbers: List<Int>): String {
+    if (numbers.isEmpty()) return ""
+    val sequence = numbers.joinToString("-")
+    return when (action) {
+        PlayAction.FLY_OUT -> "F$sequence"
+        PlayAction.GROUND_OUT -> sequence
+        PlayAction.SACRIFICE_FLY -> "SF$sequence"
+        PlayAction.DOUBLE_PLAY -> "$sequence DP"
+        PlayAction.TRIPLE_PLAY -> "$sequence TP"
+        else -> sequence
+    }
+}
+
 @Composable
 private fun SimpleNameDropdown(
     label: String,
     names: List<String>,
     selected: String?,
     allowNone: Boolean,
-    onSelected: (String?) -> Unit
+    onSelected: (String?) -> Unit,
+    displayName: (String) -> String = { it }
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box(modifier = Modifier.fillMaxWidth()) {
         OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
-            Text("$label: ${selected ?: if (allowNone) "None" else "Choose"}")
+            Text("$label: ${selected?.let(displayName) ?: if (allowNone) "None" else "Choose"}")
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             if (allowNone) {
@@ -3275,7 +4309,7 @@ private fun SimpleNameDropdown(
                 })
             }
             names.forEach { name ->
-                DropdownMenuItem(text = { Text(name) }, onClick = {
+                DropdownMenuItem(text = { Text(displayName(name)) }, onClick = {
                     expanded = false
                     onSelected(name)
                 })
@@ -3292,22 +4326,34 @@ private fun BaseRunningEventDialog(
     onCommit: (BaseRunningAction, Int?, Base?, String?) -> Unit
 ) {
     val runners = listOfNotNull(state.bases.first, state.bases.second, state.bases.third)
-    var action by remember { mutableStateOf(BaseRunningAction.STOLEN_BASE) }
+    var action by remember(state.bases) {
+        mutableStateOf(if (runners.isEmpty()) BaseRunningAction.WILD_PITCH else BaseRunningAction.STOLEN_BASE)
+    }
     var runnerId by remember(state.bases) { mutableStateOf(runners.firstOrNull()?.playerId) }
     var destination by remember(action, runnerId) {
-        mutableStateOf(runners.firstOrNull { it.playerId == runnerId }?.base?.let(::nextBaseForUi))
+        val runner = runners.firstOrNull { it.playerId == runnerId }
+        mutableStateOf(runner?.base?.let { defaultRunnerDestination(it, action) })
     }
     var fielder by remember(action) { mutableStateOf<String?>(null) }
+    var showEventWarning by remember { mutableStateOf(false) }
     val fieldingNames = remember(state) { defensivePlayerNames(state) }
-    val runnerRequired = action in setOf(
-        BaseRunningAction.STOLEN_BASE,
-        BaseRunningAction.CAUGHT_STEALING,
-        BaseRunningAction.PICKOFF,
-        BaseRunningAction.RUNNER_OUT,
-        BaseRunningAction.DEFENSIVE_INDIFFERENCE,
-        BaseRunningAction.RUNNER_ADVANCE
-    )
+    val fieldingPositions = remember(state) { defensivePlayerPositions(state) }
+    val runnerRequired = baseRunningActionRequiresRunner(action)
     val removesRunner = action == BaseRunningAction.CAUGHT_STEALING || action == BaseRunningAction.PICKOFF || action == BaseRunningAction.RUNNER_OUT
+    val selectedRunner = runners.firstOrNull { it.playerId == runnerId }
+    val destinationOptions = selectedRunner?.let { validRunnerEventDestinations(it.base, action) }.orEmpty()
+    val eventWarnings = buildList {
+        if (removesRunner && fielder == null) {
+            add("No fielder is selected for the putout, so the out will be recorded without fielding credit.")
+        }
+        if (!removesRunner && runnerId != null && destination == null) {
+            add("A runner is selected, but no destination base is selected.")
+        }
+    }
+
+    fun commitEvent() {
+        onCommit(action, runnerId, destination, fielder)
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -3318,13 +4364,31 @@ private fun BaseRunningEventDialog(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text("Record events that happen outside a normal plate appearance.", style = MaterialTheme.typography.bodySmall)
+                if (runners.isEmpty()) {
+                    Text(
+                        "No runners are on base. Runner-only events are disabled; wild pitch and passed ball can still be recorded as event-only pitches.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 BaseRunningAction.values().forEach { option ->
+                    val enabled = !(baseRunningActionRequiresRunner(option) && runners.isEmpty())
                     FilterChip(
                         selected = action == option,
+                        enabled = enabled,
                         onClick = {
                             action = option
-                            if (option in setOf(BaseRunningAction.CAUGHT_STEALING, BaseRunningAction.PICKOFF, BaseRunningAction.RUNNER_OUT)) destination = null
-                            else if (destination == null) destination = runners.firstOrNull { it.playerId == runnerId }?.base?.let(::nextBaseForUi)
+                            val selected = runners.firstOrNull { it.playerId == runnerId }
+                            if (baseRunningActionRequiresRunner(option) && selected == null) {
+                                runnerId = runners.firstOrNull()?.playerId
+                            }
+                            val currentRunner = runners.firstOrNull { it.playerId == runnerId }
+                            destination = if (option in setOf(BaseRunningAction.CAUGHT_STEALING, BaseRunningAction.PICKOFF, BaseRunningAction.RUNNER_OUT)) {
+                                null
+                            } else {
+                                currentRunner?.base?.let { defaultRunnerDestination(it, option) }
+                            }
+                            fielder = null
                         },
                         label = { Text(baseRunningUiLabel(option)) }
                     )
@@ -3343,19 +4407,16 @@ private fun BaseRunningEventDialog(
                         selected = runnerId == runner.playerId,
                         onClick = {
                             runnerId = runner.playerId
-                            destination = if (removesRunner) null else nextBaseForUi(runner.base)
+                            destination = if (removesRunner) null else defaultRunnerDestination(runner.base, action)
                         },
                         label = { Text("${baseLabelUi(runner.base)} — ${state.playerName(runner.playerId) ?: "Unknown"}") }
                     )
-                }
-                if (runners.isEmpty()) {
-                    Text("No runners are currently on base.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
 
                 if (!removesRunner && runnerId != null) {
                     Text("Destination", fontWeight = FontWeight.SemiBold)
                     Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf(Base.SECOND, Base.THIRD, Base.HOME).forEach { base ->
+                        destinationOptions.forEach { base ->
                             FilterChip(
                                 selected = destination == base,
                                 onClick = { destination = base },
@@ -3363,27 +4424,59 @@ private fun BaseRunningEventDialog(
                             )
                         }
                     }
+                    if (destinationOptions.isEmpty()) {
+                        Text(
+                            "There is no valid forward destination for this runner/event.",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
                 }
 
-                if (action == BaseRunningAction.CAUGHT_STEALING || action == BaseRunningAction.PICKOFF || action == BaseRunningAction.RUNNER_OUT) {
+                if (removesRunner) {
                     SimpleNameDropdown(
                         label = "Putout by",
                         names = fieldingNames,
                         selected = fielder,
                         allowNone = true,
-                        onSelected = { fielder = it }
+                        onSelected = { fielder = it },
+                        displayName = { name ->
+                            fieldingPositions[name]
+                                ?.takeIf(String::isNotBlank)
+                                ?.let { position -> "$position — $name" }
+                                ?: name
+                        }
                     )
                 }
             }
         },
         confirmButton = {
             Button(
-                onClick = { onCommit(action, runnerId, destination, fielder) },
+                onClick = {
+                    if (eventWarnings.isNotEmpty()) showEventWarning = true else commitEvent()
+                },
                 enabled = (!runnerRequired || runnerId != null) && (removesRunner || runnerId == null || destination != null)
             ) { Text("Record Event") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
+
+    if (showEventWarning && eventWarnings.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { showEventWarning = false },
+            title = { Text("Check this event") },
+            text = { Text(eventWarnings.joinToString("\n\n") { "• $it" }) },
+            confirmButton = {
+                Button(onClick = {
+                    showEventWarning = false
+                    commitEvent()
+                }) { Text("Record Anyway") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEventWarning = false }) { Text("Go Back") }
+            }
+        )
+    }
 }
 
 private fun nextBaseForUi(base: Base): Base = when (base) {
@@ -3412,6 +4505,56 @@ private fun baseRunningUiLabel(action: BaseRunningAction): String = when (action
     BaseRunningAction.RUNNER_ADVANCE -> "Other Runner Advance"
 }
 
+private fun baseRunningActionRequiresRunner(action: BaseRunningAction): Boolean = action in setOf(
+    BaseRunningAction.STOLEN_BASE,
+    BaseRunningAction.CAUGHT_STEALING,
+    BaseRunningAction.PICKOFF,
+    BaseRunningAction.RUNNER_OUT,
+    BaseRunningAction.BALK,
+    BaseRunningAction.DEFENSIVE_INDIFFERENCE,
+    BaseRunningAction.RUNNER_ADVANCE
+)
+
+private fun baseRank(base: Base): Int = when (base) {
+    Base.FIRST -> 1
+    Base.SECOND -> 2
+    Base.THIRD -> 3
+    Base.HOME -> 4
+}
+
+private fun validRunnerEventDestinations(origin: Base, action: BaseRunningAction): List<Base> {
+    val forward = listOf(Base.SECOND, Base.THIRD, Base.HOME).filter { baseRank(it) > baseRank(origin) }
+    return when (action) {
+        BaseRunningAction.STOLEN_BASE,
+        BaseRunningAction.DEFENSIVE_INDIFFERENCE -> forward.take(1)
+        BaseRunningAction.CAUGHT_STEALING,
+        BaseRunningAction.PICKOFF,
+        BaseRunningAction.RUNNER_OUT -> emptyList()
+        else -> forward
+    }
+}
+
+private fun defaultRunnerDestination(origin: Base, action: BaseRunningAction): Base? =
+    validRunnerEventDestinations(origin, action).firstOrNull()
+
+private fun runnerBase(state: GameState, playerId: Int): Base? = when (playerId) {
+    state.bases.first?.playerId -> Base.FIRST
+    state.bases.second?.playerId -> Base.SECOND
+    state.bases.third?.playerId -> Base.THIRD
+    else -> null
+}
+
+private fun validDestinationChoices(
+    state: GameState,
+    playerId: Int,
+    batterId: Int
+): List<Pair<String, Base?>> {
+    if (playerId == batterId) return destinationChoices
+    val origin = runnerBase(state, playerId) ?: return destinationChoices
+    return destinationChoices.filter { (_, destination) ->
+        destination == null || baseRank(destination) >= baseRank(origin)
+    }
+}
 
 private val destinationChoices = listOf(
     "OUT" to null,
@@ -3420,6 +4563,127 @@ private val destinationChoices = listOf(
     "3B" to Base.THIRD,
     "HOME" to Base.HOME
 )
+
+private fun runnerCount(state: GameState): Int = listOfNotNull(
+    state.bases.first,
+    state.bases.second,
+    state.bases.third
+).size
+
+private fun smartWarningForPlay(state: GameState, action: PlayAction): SmartActionWarning? {
+    val runners = runnerCount(state)
+    val reasons = mutableListOf<String>()
+
+    when (action) {
+        PlayAction.WALK -> {
+            if (state.balls < 3) {
+                reasons += "The current count is ${state.balls}-${state.strikes}. A normal walk needs a fourth ball."
+            }
+        }
+        PlayAction.STRIKEOUT -> {
+            if (state.strikes < 2) {
+                reasons += "The current count is ${state.balls}-${state.strikes}. A normal strikeout needs a third strike."
+            }
+        }
+        PlayAction.FIELDERS_CHOICE -> {
+            if (runners == 0) reasons += "There are no runners on base for the defense to choose instead of the batter."
+        }
+        PlayAction.SACRIFICE, PlayAction.SACRIFICE_BUNT -> {
+            if (runners == 0) reasons += "There are no runners on base to advance with a sacrifice."
+            if (state.outs >= 2) reasons += "There are already 2 outs. A sacrifice bunt is not normally credited with two outs."
+        }
+        PlayAction.SACRIFICE_FLY -> {
+            if (runners == 0) reasons += "There are no runners on base to score on a sacrifice fly."
+            if (state.outs >= 2) reasons += "There are already 2 outs. A sacrifice fly is not credited when the catch makes the third out."
+        }
+        PlayAction.DOUBLE_PLAY -> {
+            if (runners == 0) reasons += "There are no runners on base. A normal double play needs the batter plus another runner."
+            if (state.outs >= 2) reasons += "There are already 2 outs, so only one out remains in the inning."
+        }
+        PlayAction.TRIPLE_PLAY -> {
+            if (runners < 2) reasons += "A normal triple play needs at least two runners on base in addition to the batter."
+            if (state.outs > 0) reasons += "There are already ${state.outs} out${if (state.outs == 1) "" else "s"}, so fewer than three outs remain in the inning."
+        }
+        else -> Unit
+    }
+
+    if (reasons.isEmpty()) return null
+    return SmartActionWarning(
+        title = "${plainPlayLabel(action)} — are you sure?",
+        message = reasons.joinToString("\n\n") { "• $it" },
+        confirmText = "Record ${plainPlayLabel(action)}"
+    )
+}
+
+private fun smartResolutionWarnings(
+    state: GameState,
+    action: PlayAction,
+    batterId: Int,
+    destinations: Map<Int, Base?>,
+    outsRecorded: Int
+): List<String> = buildList {
+    val batterDestination = destinations[batterId]
+    val batterShouldBeOut = action in setOf(
+        PlayAction.GROUND_OUT,
+        PlayAction.FLY_OUT,
+        PlayAction.SACRIFICE,
+        PlayAction.SACRIFICE_BUNT,
+        PlayAction.SACRIFICE_FLY
+    )
+    if (batterShouldBeOut && batterDestination != null) {
+        add("This result says the batter is out, but the batter is currently set to finish at ${baseLabelUi(batterDestination)}.")
+    }
+
+    val expectedOuts = when (action) {
+        PlayAction.GROUND_OUT, PlayAction.FLY_OUT, PlayAction.SACRIFICE, PlayAction.SACRIFICE_BUNT, PlayAction.SACRIFICE_FLY -> 1
+        PlayAction.DOUBLE_PLAY -> 2
+        PlayAction.TRIPLE_PLAY -> 3
+        else -> null
+    }
+    if (expectedOuts != null && outsRecorded != expectedOuts) {
+        add("${plainPlayLabel(action)} normally records $expectedOuts out${if (expectedOuts == 1) "" else "s"}, but this play is set to record $outsRecorded.")
+    }
+
+    if (action !in setOf(PlayAction.DOUBLE_PLAY, PlayAction.TRIPLE_PLAY) && state.outs + outsRecorded > 3) {
+        add("There are only ${3 - state.outs} out${if (3 - state.outs == 1) "" else "s"} remaining in the inning, but this play is set to record $outsRecorded.")
+    }
+
+    if (action == PlayAction.SACRIFICE_FLY) {
+        val runnerScores = destinations.any { (playerId, destination) -> playerId != batterId && destination == Base.HOME }
+        if (!runnerScores) add("No existing runner is set to score. Without a run scoring after the catch, this would normally be recorded as a fly out rather than a sacrifice fly.")
+    }
+
+    if (action == PlayAction.SACRIFICE || action == PlayAction.SACRIFICE_BUNT) {
+        val runnerAdvanced = destinations.any { (playerId, destination) ->
+            if (playerId == batterId || destination == null) return@any false
+            val origin = runnerBase(state, playerId) ?: return@any false
+            baseRank(destination) > baseRank(origin)
+        }
+        if (!runnerAdvanced) add("No existing runner is set to advance. A sacrifice bunt normally advances a runner while the batter is retired.")
+    }
+}
+
+private fun smartEndGameMessage(state: GameState): String {
+    val checks = buildList {
+        if (state.currentInning < state.maxInnings) {
+            add("The game is only in inning ${state.currentInning} of ${state.maxInnings}.")
+        }
+        if (state.totalRuns(Team.AWAY) == state.totalRuns(Team.HOME)) {
+            add("The score is tied ${state.totalRuns(Team.AWAY)}-${state.totalRuns(Team.HOME)}.")
+        }
+        if (state.balls > 0 || state.strikes > 0) {
+            add("The current batter has an unfinished ${state.balls}-${state.strikes} count.")
+        }
+        if (!state.bases.isEmpty()) {
+            add("There are still runners on base.")
+        }
+    }
+    return if (checks.isEmpty()) {
+        "The current score will be saved as the final score. You can still start a new game afterward."
+    } else {
+        "Before ending the game:\n\n${checks.joinToString("\n") { "• $it" }}\n\nEnd the game anyway?"
+    }
+}
 
 private fun playLabel(action: PlayAction): String = when (action) {
     PlayAction.SINGLE -> "Single — Runner Results"
@@ -3820,6 +5084,7 @@ private fun HistoricalScorecardScreen(
     onBack: () -> Unit,
     onCorrectFinalScore: (Int, Int) -> Unit,
     onCorrectEvent: (Long, Int?, String?, PlayAction?) -> Unit,
+    onEditAtBat: (Long, List<PitchAction>, PlayAction, Int?, String?, String?) -> Unit,
     onDeleteEvent: (Long) -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -3873,7 +5138,7 @@ private fun HistoricalScorecardScreen(
         OutlinedButton(onClick = { showScoreCorrection = true }, modifier = Modifier.fillMaxWidth()) {
             Text("Correct Final Score")
         }
-        FullScorecardScreen(state)
+        FullScorecardScreen(state = state, onEditAtBat = onEditAtBat)
         GameStatsCard(state)
         PostgameCorrectionsCard(
             state = state,
@@ -4067,8 +5332,21 @@ private fun plainPlayLabel(action: PlayAction): String = when (action) {
 }
 
 @Composable
-private fun FullScorecardScreen(state: GameState) {
+private fun FullScorecardScreen(
+    state: GameState,
+    onEditAtBat: ((Long, List<PitchAction>, PlayAction, Int?, String?, String?) -> Unit)? = null
+) {
     val displayedInnings = maxOf(11, state.maxInnings, state.currentInning)
+    val gridMetrics = remember(state.events, state.lineupAway, state.lineupHome) { scorecardGridMetrics(state) }
+    var selectedAtBat by remember { mutableStateOf<GameEvent?>(null) }
+    var atBatChoices by remember { mutableStateOf<List<GameEvent>>(emptyList()) }
+    val cellTap: ((List<GameEvent>) -> Unit)? = if (onEditAtBat != null) {
+        { events: List<GameEvent> ->
+            if (events.size == 1) selectedAtBat = events.first()
+            else if (events.isNotEmpty()) atBatChoices = events
+        }
+    } else null
+
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(
             "Full Scorecard",
@@ -4076,7 +5354,11 @@ private fun FullScorecardScreen(state: GameState) {
             fontWeight = FontWeight.Bold
         )
         Text(
-            "Styled after a traditional paper scorebook. Use this with Scorekeeping and Game Overview.",
+            if (onEditAtBat != null) {
+                "Tap any recorded at-bat cell to review and correct its pitches, batter, pitcher or outcome."
+            } else {
+                "Styled after a traditional paper scorebook. Use this with Scorekeeping and Game Overview."
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -4090,12 +5372,333 @@ private fun FullScorecardScreen(state: GameState) {
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
-            TeamScorecardSection(state, Team.AWAY, displayedInnings)
-            TeamScorecardSection(state, Team.HOME, displayedInnings)
+            TeamScorecardSection(
+                state = state,
+                team = Team.AWAY,
+                displayedInnings = displayedInnings,
+                gridMetrics = gridMetrics,
+                onAtBatCellTapped = cellTap
+            )
+            TeamScorecardSection(
+                state = state,
+                team = Team.HOME,
+                displayedInnings = displayedInnings,
+                gridMetrics = gridMetrics,
+                onAtBatCellTapped = cellTap
+            )
             PitchingScorecardSection(state)
             ScorecardSummarySection(state, displayedInnings)
         }
     }
+
+    if (atBatChoices.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { atBatChoices = emptyList() },
+            title = { Text("Choose at-bat") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "This batter had more than one plate appearance in this inning.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    atBatChoices.forEachIndexed { index, event ->
+                        OutlinedButton(
+                            onClick = {
+                                selectedAtBat = event
+                                atBatChoices = emptyList()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("${index + 1}. ${scorecardCodeFor(event) ?: plainPlayLabel(event.playAction ?: PlayAction.GROUND_OUT)} — ${event.actorName ?: "Unknown"}")
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { atBatChoices = emptyList() }) { Text("Cancel") }
+            }
+        )
+    }
+
+    selectedAtBat?.let { event ->
+        if (onEditAtBat != null) {
+            ScorecardAtBatEditorDialog(
+                state = state,
+                endEvent = event,
+                onDismiss = { selectedAtBat = null },
+                onSave = { pitches, action, batterId, pitcher, notation ->
+                    selectedAtBat = null
+                    onEditAtBat(event.id, pitches, action, batterId, pitcher, notation)
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun ScorecardAtBatEditorDialog(
+    state: GameState,
+    endEvent: GameEvent,
+    onDismiss: () -> Unit,
+    onSave: (List<PitchAction>, PlayAction, Int?, String?, String?) -> Unit
+) {
+    val lineup = if (endEvent.battingTeam == Team.AWAY) state.lineupAway else state.lineupHome
+    var batterId by remember(endEvent.id) { mutableStateOf(endEvent.actorPlayerId) }
+    var pitcher by remember(endEvent.id) { mutableStateOf(endEvent.pitcherName.orEmpty()) }
+    var outcome by remember(endEvent.id) { mutableStateOf(endEvent.playAction ?: PlayAction.GROUND_OUT) }
+    var outcomeExpanded by remember { mutableStateOf(false) }
+    var pitches by remember(endEvent.id) { mutableStateOf(recordedAtBatPitches(state, endEvent.id)) }
+    var fieldingNotation by remember(endEvent.id) {
+        mutableStateOf(
+            if (endEvent.playAction == PlayAction.GROUND_OUT) endEvent.fieldingNotation.orEmpty().removePrefix("G")
+            else endEvent.fieldingNotation.orEmpty()
+        )
+    }
+    var showDiscardChanges by remember(endEvent.id) { mutableStateOf(false) }
+    val originalPitches = remember(endEvent.id) { recordedAtBatPitches(state, endEvent.id) }
+    val originalOutcome = endEvent.playAction ?: PlayAction.GROUND_OUT
+    val originalPitcher = endEvent.pitcherName.orEmpty()
+    val originalNotation = if (endEvent.playAction == PlayAction.GROUND_OUT) endEvent.fieldingNotation.orEmpty().removePrefix("G") else endEvent.fieldingNotation.orEmpty()
+    val hasUnsavedChanges = batterId != endEvent.actorPlayerId || pitcher != originalPitcher || outcome != originalOutcome ||
+        pitches != originalPitches || fieldingNotation != originalNotation
+
+    fun requestDismiss() {
+        if (hasUnsavedChanges) showDiscardChanges = true else onDismiss()
+    }
+
+    val ballCount = pitches.count { it == PitchAction.BALL }
+    val strikeCount = pitches.count { it == PitchAction.STRIKE }
+    val foulCount = pitches.count { it == PitchAction.FOUL }
+    val inPlayCount = pitches.count { it == PitchAction.IN_PLAY }
+    val hbpCount = pitches.count { it == PitchAction.HIT_BY_PITCH }
+
+    AlertDialog(
+        onDismissRequest = { requestDismiss() },
+        title = { Text("Edit at-bat") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "${if (endEvent.topOfInning) "Top" else "Bottom"} ${endEvent.inning}",
+                    fontWeight = FontWeight.Bold
+                )
+                PlayerIdDropdown("Batter", lineup, batterId) { batterId = it }
+                OutlinedTextField(
+                    value = pitcher,
+                    onValueChange = { pitcher = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Pitcher") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words)
+                )
+
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(
+                        onClick = { outcomeExpanded = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Outcome: ${plainPlayLabel(outcome)}")
+                    }
+                    DropdownMenu(
+                        expanded = outcomeExpanded,
+                        onDismissRequest = { outcomeExpanded = false }
+                    ) {
+                        PlayAction.values().forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(plainPlayLabel(option)) },
+                                onClick = {
+                                    outcome = option
+                                    if (!supportsScorebookFieldingNotation(option)) fieldingNotation = ""
+                                    outcomeExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                if (supportsScorebookFieldingNotation(outcome)) {
+                    OutlinedTextField(
+                        value = fieldingNotation,
+                        onValueChange = { fieldingNotation = it.uppercase() },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Scorecard fielding notation") },
+                        placeholder = {
+                            Text(
+                                when (outcome) {
+                                    PlayAction.FLY_OUT -> "F8"
+                                    PlayAction.GROUND_OUT -> "6-3"
+                                    PlayAction.DOUBLE_PLAY -> "5-4-3 DP"
+                                    PlayAction.TRIPLE_PLAY -> "5-4-3-2 TP"
+                                    PlayAction.SACRIFICE_FLY -> "SF8"
+                                    else -> "6-3"
+                                }
+                            )
+                        },
+                        singleLine = true
+                    )
+                    Text(
+                        "Use defensive position numbers: 1 P, 2 C, 3 1B, 4 2B, 5 3B, 6 SS, 7 LF, 8 CF, 9 RF.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                HorizontalDivider()
+                Text("Pitch sequence", fontWeight = FontWeight.SemiBold)
+                Text(
+                    "${pitches.size} pitches • Balls $ballCount • Strikes $strikeCount • Fouls $foulCount${if (inPlayCount > 0) " • In play $inPlayCount" else ""}${if (hbpCount > 0) " • HBP $hbpCount" else ""}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { pitches = pitches + PitchAction.BALL },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("+ Ball") }
+                    OutlinedButton(
+                        onClick = { pitches = pitches + PitchAction.STRIKE },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("+ Strike") }
+                    OutlinedButton(
+                        onClick = { pitches = pitches + PitchAction.FOUL },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("+ Foul") }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { pitches = pitches + PitchAction.IN_PLAY },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("+ In play") }
+                    OutlinedButton(
+                        onClick = { pitches = pitches + PitchAction.HIT_BY_PITCH },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("+ HBP") }
+                }
+
+                if (pitches.isEmpty()) {
+                    Text(
+                        "No pitches are recorded for this at-bat.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    pitches.forEachIndexed { index, pitch ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "${index + 1}. ${pitchEditorLabel(pitch)}",
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(onClick = {
+                                pitches = pitches.toMutableList().also { it.removeAt(index) }
+                            }) {
+                                Text("Remove")
+                            }
+                        }
+                    }
+                }
+
+                if (endEvent.runsScored > 0 || endEvent.outsRecorded > 0 || endEvent.putoutPlayerName != null || endEvent.assistPlayerNames.isNotEmpty()) {
+                    HorizontalDivider()
+                    Text("Recorded play details", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        buildString {
+                            append("Runs: ${endEvent.runsScored} • Outs: ${endEvent.outsRecorded}")
+                            endEvent.putoutPlayerName?.let { append(" • Putout: $it") }
+                            if (endEvent.assistPlayerNames.isNotEmpty()) append(" • Assists: ${endEvent.assistPlayerNames.joinToString()}")
+                            endEvent.fieldingNotation?.let { append(" • Scorecard: $it") }
+                        },
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        "Changing the outcome updates the scorecard and statistical classification. Runner movement, runs already recorded, and fielding credits are preserved; correct those separately in Game Overview if needed.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = {
+                onSave(
+                    pitches,
+                    outcome,
+                    batterId,
+                    pitcher.trim().takeIf(String::isNotBlank),
+                    fieldingNotation.trim().takeIf(String::isNotBlank)
+                )
+            }) { Text("Save At-Bat") }
+        },
+        dismissButton = { TextButton(onClick = { requestDismiss() }) { Text("Cancel") } }
+    )
+
+    if (showDiscardChanges) {
+        UnsavedChangesDialog(
+            title = "Discard at-bat changes?",
+            message = "You changed this recorded at-bat but have not saved it. Going back now will discard those corrections.",
+            onKeepEditing = { showDiscardChanges = false },
+            onDiscard = {
+                showDiscardChanges = false
+                onDismiss()
+            }
+        )
+    }
+}
+
+private fun recordedAtBatPitches(state: GameState, endEventId: Long): List<PitchAction> {
+    val endIndex = state.events.indexOfFirst { it.id == endEventId }
+    if (endIndex < 0) return emptyList()
+    val endEvent = state.events[endIndex]
+    if (!isScorecardPlateAppearance(endEvent)) return emptyList()
+    val previousCompletionIndex = state.events
+        .subList(0, endIndex)
+        .indexOfLast(::isScorecardPlateAppearance)
+    return state.events
+        .subList(previousCompletionIndex + 1, endIndex + 1)
+        .filter { event ->
+            event.type == GameEventType.PITCH &&
+                event.battingTeam == endEvent.battingTeam &&
+                event.actorPlayerId == endEvent.actorPlayerId
+        }
+        .mapNotNull(GameEvent::pitchAction)
+}
+
+private fun pitchEditorLabel(action: PitchAction): String = when (action) {
+    PitchAction.BALL -> "Ball"
+    PitchAction.STRIKE -> "Strike"
+    PitchAction.FOUL -> "Foul"
+    PitchAction.IN_PLAY -> "Ball in play"
+    PitchAction.HIT_BY_PITCH -> "Hit by pitch"
+}
+
+private fun isScorecardPlateAppearance(event: GameEvent): Boolean =
+    event.playAction != null && event.type in setOf(GameEventType.PLAY, GameEventType.PITCH)
+
+private fun scorecardPlateAppearances(
+    state: GameState,
+    team: Team,
+    playerId: Int,
+    inning: Int
+): List<GameEvent> = state.events.filter { event ->
+    event.battingTeam == team &&
+        event.actorPlayerId == playerId &&
+        event.inning == inning &&
+        isScorecardPlateAppearance(event)
 }
 
 @Composable
@@ -4121,7 +5724,9 @@ private fun ScorecardGameInfo(state: GameState) {
 private fun TeamScorecardSection(
     state: GameState,
     team: Team,
-    displayedInnings: Int
+    displayedInnings: Int,
+    gridMetrics: ScorecardGridMetrics,
+    onAtBatCellTapped: ((List<GameEvent>) -> Unit)? = null
 ) {
     val lineup = if (team == Team.AWAY) state.lineupAway else state.lineupHome
     val lineMap = buildScorecardLines(state, team)
@@ -4131,12 +5736,12 @@ private fun TeamScorecardSection(
         fontWeight = FontWeight.Bold
     )
     Row(verticalAlignment = Alignment.CenterVertically) {
-        ScorecardHeaderCell("No", 36.dp)
-        ScorecardHeaderCell("BATTER", 180.dp)
-        ScorecardHeaderCell("PO", 44.dp)
-        for (inning in 1..displayedInnings) ScorecardHeaderCell(inning.toString(), 64.dp)
+        ScorecardHeaderCell("No", 36.dp, gridMetrics.rowHeight)
+        ScorecardHeaderCell("BATTER", 180.dp, gridMetrics.rowHeight)
+        ScorecardHeaderCell("PO", 44.dp, gridMetrics.rowHeight)
+        for (inning in 1..displayedInnings) ScorecardHeaderCell(inning.toString(), gridMetrics.inningWidth, gridMetrics.rowHeight)
         listOf("AB", "R", "H", "RBI", "BB", "SO").forEach { label ->
-            ScorecardHeaderCell(label, 42.dp)
+            ScorecardHeaderCell(label, 42.dp, gridMetrics.rowHeight)
         }
     }
     val unknownStats = GameStats.batting(state, team).filter { it.playerId < 0 }
@@ -4148,19 +5753,28 @@ private fun TeamScorecardSection(
     rows.forEach { (playerId, orderLabel, playerName) ->
         val line = lineMap[playerId] ?: ScorecardPlayerLine(emptyMap(), 0, 0, 0, 0, 0, 0)
         Row(verticalAlignment = Alignment.Top) {
-            ScorecardBodyCell(orderLabel, 36.dp)
-            ScorecardBodyCell(playerName, 180.dp)
-            ScorecardBodyCell(if (playerId < 0) "?" else state.playerPosition(playerId) ?: "—", 44.dp)
+            ScorecardBodyCell(orderLabel, 36.dp, height = gridMetrics.rowHeight)
+            ScorecardBodyCell(playerName, 180.dp, height = gridMetrics.rowHeight)
+            ScorecardBodyCell(if (playerId < 0) "?" else state.playerPosition(playerId) ?: "—", 44.dp, height = gridMetrics.rowHeight)
             for (inning in 1..displayedInnings) {
                 val entry = line.entriesByInning[inning]?.joinToString(" / ") ?: ""
-                ScorecardBodyCell(entry, 64.dp, minHeight = 44.dp)
+                val plateAppearances = scorecardPlateAppearances(state, team, playerId, inning)
+                val cellOnClick: (() -> Unit)? = if (onAtBatCellTapped != null && plateAppearances.isNotEmpty()) {
+                    { onAtBatCellTapped(plateAppearances) }
+                } else null
+                ScorecardBodyCell(
+                    text = entry,
+                    width = gridMetrics.inningWidth,
+                    height = gridMetrics.rowHeight,
+                    onClick = cellOnClick
+                )
             }
-            ScorecardBodyCell(line.atBats.toString(), 42.dp)
-            ScorecardBodyCell(line.runs.toString(), 42.dp)
-            ScorecardBodyCell(line.hits.toString(), 42.dp)
-            ScorecardBodyCell(line.rbi.toString(), 42.dp)
-            ScorecardBodyCell(line.walks.toString(), 42.dp)
-            ScorecardBodyCell(line.strikeouts.toString(), 42.dp)
+            ScorecardBodyCell(line.atBats.toString(), 42.dp, height = gridMetrics.rowHeight)
+            ScorecardBodyCell(line.runs.toString(), 42.dp, height = gridMetrics.rowHeight)
+            ScorecardBodyCell(line.hits.toString(), 42.dp, height = gridMetrics.rowHeight)
+            ScorecardBodyCell(line.rbi.toString(), 42.dp, height = gridMetrics.rowHeight)
+            ScorecardBodyCell(line.walks.toString(), 42.dp, height = gridMetrics.rowHeight)
+            ScorecardBodyCell(line.strikeouts.toString(), 42.dp, height = gridMetrics.rowHeight)
         }
     }
 }
@@ -4243,12 +5857,17 @@ private fun ScorecardSummarySection(state: GameState, displayedInnings: Int) {
 }
 
 @Composable
-private fun ScorecardHeaderCell(text: String, width: androidx.compose.ui.unit.Dp) {
+private fun ScorecardHeaderCell(
+    text: String,
+    width: androidx.compose.ui.unit.Dp,
+    height: androidx.compose.ui.unit.Dp = 36.dp
+) {
     Box(
         modifier = Modifier
             .width(width)
+            .height(height)
             .border(1.dp, MaterialTheme.colorScheme.outlineVariant)
-            .padding(horizontal = 4.dp, vertical = 6.dp),
+            .padding(horizontal = 4.dp, vertical = 4.dp),
         contentAlignment = Alignment.CenterStart
     ) {
         Text(text, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
@@ -4256,17 +5875,67 @@ private fun ScorecardHeaderCell(text: String, width: androidx.compose.ui.unit.Dp
 }
 
 @Composable
-private fun ScorecardBodyCell(text: String, width: androidx.compose.ui.unit.Dp, minHeight: androidx.compose.ui.unit.Dp = 32.dp) {
+private fun ScorecardBodyCell(
+    text: String,
+    width: androidx.compose.ui.unit.Dp,
+    height: androidx.compose.ui.unit.Dp = 36.dp,
+    onClick: (() -> Unit)? = null
+) {
+    val clickModifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
     Box(
         modifier = Modifier
             .width(width)
-            .heightIn(min = minHeight)
+            .height(height)
             .border(1.dp, MaterialTheme.colorScheme.outlineVariant)
-            .padding(horizontal = 4.dp, vertical = 6.dp),
+            .then(clickModifier)
+            .padding(horizontal = 4.dp, vertical = 4.dp),
         contentAlignment = Alignment.CenterStart
     ) {
-        Text(text, fontSize = 11.sp)
+        Text(
+            text = text,
+            fontSize = 11.sp,
+            maxLines = 3,
+            color = if (onClick != null && text.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+        )
     }
+}
+
+private data class ScorecardGridMetrics(
+    val inningWidth: androidx.compose.ui.unit.Dp,
+    val rowHeight: androidx.compose.ui.unit.Dp
+)
+
+private fun scorecardGridMetrics(state: GameState): ScorecardGridMetrics {
+    val lines = buildScorecardLines(state, Team.AWAY).values + buildScorecardLines(state, Team.HOME).values
+    val cellTexts = lines.flatMap { line ->
+        line.entriesByInning.values.map { entries -> entries.joinToString(" / ") }
+    }
+    val longest = cellTexts.maxOfOrNull(String::length) ?: 0
+    val maxEntries = lines.flatMap { it.entriesByInning.values }.maxOfOrNull { it.size } ?: 0
+
+    val width = when {
+        longest > 14 -> 104.dp
+        longest > 9 -> 88.dp
+        longest > 6 -> 76.dp
+        else -> 64.dp
+    }
+    val height = when {
+        maxEntries >= 3 || longest > 18 -> 72.dp
+        maxEntries == 2 || longest > 10 -> 58.dp
+        else -> 44.dp
+    }
+    return ScorecardGridMetrics(width, height)
+}
+
+private fun normalizeGroundOutNotation(raw: String?): String {
+    val text = raw?.trim().orEmpty()
+    if (text.isBlank()) return "GO"
+    val cleaned = text
+        .replace(Regex("^GO\\s*/\\s*", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("^GO\\s+", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("^G(?=\\d)", RegexOption.IGNORE_CASE), "")
+        .trim()
+    return cleaned.ifBlank { "GO" }
 }
 
 private fun buildScorecardLines(state: GameState, team: Team): Map<Int, ScorecardPlayerLine> {
@@ -4277,9 +5946,22 @@ private fun buildScorecardLines(state: GameState, team: Team): Map<Int, Scorecar
     state.events.filter { it.battingTeam == team && it.actorPlayerId in trackedPlayers }.forEach { event ->
         val playerId = event.actorPlayerId ?: return@forEach
         val code = scorecardCodeFor(event) ?: return@forEach
-        entries.getOrPut(playerId) { mutableMapOf() }
+        val inningEntries = entries.getOrPut(playerId) { mutableMapOf() }
             .getOrPut(event.inning) { mutableListOf() }
-            .add(code)
+        val previous = inningEntries.lastOrNull()
+        val replacesGenericOut = when (event.playAction) {
+            PlayAction.GROUND_OUT -> previous == "GO" && code != "GO"
+            PlayAction.FLY_OUT -> previous == "FO" && code != "FO"
+            PlayAction.SACRIFICE_FLY -> previous == "SF" && code != "SF"
+            PlayAction.DOUBLE_PLAY -> previous == "DP" && code != "DP"
+            PlayAction.TRIPLE_PLAY -> previous == "TP" && code != "TP"
+            else -> false
+        }
+        if (replacesGenericOut) {
+            inningEntries[inningEntries.lastIndex] = code
+        } else {
+            inningEntries.add(code)
+        }
     }
     val statMap = stats.associateBy(BattingStats::playerId)
     return trackedPlayers.associateWith { playerId ->
@@ -4307,14 +5989,14 @@ private fun scorecardCodeFor(event: GameEvent): String? {
             PlayAction.WALK -> "BB"
             PlayAction.INTENTIONAL_WALK -> "IBB"
             PlayAction.STRIKEOUT -> "K"
-            PlayAction.GROUND_OUT -> "GO"
-            PlayAction.FLY_OUT -> "FO"
+            PlayAction.GROUND_OUT -> normalizeGroundOutNotation(event.fieldingNotation)
+            PlayAction.FLY_OUT -> event.fieldingNotation ?: "FO"
             PlayAction.FIELDERS_CHOICE -> "FC"
             PlayAction.SACRIFICE -> "SAC"
             PlayAction.SACRIFICE_BUNT -> "SH"
-            PlayAction.SACRIFICE_FLY -> "SF"
-            PlayAction.DOUBLE_PLAY -> "DP"
-            PlayAction.TRIPLE_PLAY -> "TP"
+            PlayAction.SACRIFICE_FLY -> event.fieldingNotation ?: "SF"
+            PlayAction.DOUBLE_PLAY -> event.fieldingNotation ?: "DP"
+            PlayAction.TRIPLE_PLAY -> event.fieldingNotation ?: "TP"
             PlayAction.ERROR -> "E"
             PlayAction.HIT_BY_PITCH -> "HBP"
         }
@@ -4326,14 +6008,14 @@ private fun scorecardCodeFor(event: GameEvent): String? {
             "triple" -> "3B"
             "home run" -> "HR"
             "strikeout" -> "K"
-            "ground out" -> "GO"
-            "fly out" -> "FO"
+            "ground out" -> normalizeGroundOutNotation(event.fieldingNotation)
+            "fly out" -> event.fieldingNotation ?: "FO"
             "fielder's choice" -> "FC"
             "sacrifice" -> "SAC"
             "sacrifice bunt" -> "SH"
-            "sacrifice fly" -> "SF"
-            "double play" -> "DP"
-            "triple play" -> "TP"
+            "sacrifice fly" -> event.fieldingNotation ?: "SF"
+            "double play" -> event.fieldingNotation ?: "DP"
+            "triple play" -> event.fieldingNotation ?: "TP"
             "intentional walk" -> "IBB"
             "error" -> "E"
             else -> null

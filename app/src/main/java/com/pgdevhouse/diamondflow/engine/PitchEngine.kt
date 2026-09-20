@@ -18,6 +18,8 @@ object PitchEngine {
 
             PitchAction.FOUL -> applyFoul(state)
 
+            PitchAction.IN_PLAY -> PitchResolution(state = state)
+
             PitchAction.HIT_BY_PITCH -> PitchResolution(
                 state = state,
                 completedPlayAction = PlayAction.HIT_BY_PITCH

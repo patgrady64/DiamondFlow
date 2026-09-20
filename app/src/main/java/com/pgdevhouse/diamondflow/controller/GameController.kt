@@ -12,6 +12,7 @@ import com.pgdevhouse.diamondflow.model.GameEvent
 import com.pgdevhouse.diamondflow.model.GameEventType
 import com.pgdevhouse.diamondflow.model.GameSnapshot
 import com.pgdevhouse.diamondflow.model.GameState
+import com.pgdevhouse.diamondflow.model.GameStats
 import com.pgdevhouse.diamondflow.model.FieldingPlay
 import com.pgdevhouse.diamondflow.model.PitchAction
 import com.pgdevhouse.diamondflow.model.Play
@@ -47,6 +48,83 @@ class GameController(
     fun foul() = pitch(PitchAction.FOUL)
     fun hitByPitch() = pitch(PitchAction.HIT_BY_PITCH)
 
+    fun removeCurrentBall(): Boolean = removeCurrentCountPitch(
+        matches = { it == PitchAction.BALL },
+        updateCount = { current -> current.copy(balls = (current.balls - 1).coerceAtLeast(0)) }
+    )
+
+    fun removeCurrentStrike(): Boolean = removeCurrentCountPitch(
+        matches = { it == PitchAction.STRIKE || it == PitchAction.FOUL },
+        updateCount = { current -> current.copy(strikes = (current.strikes - 1).coerceAtLeast(0)) }
+    )
+
+    /**
+     * Removes one recorded pitch from a completed plate appearance without changing
+     * the already-recorded result of that plate appearance. If the selected pitch
+     * itself carried the result (Ball 4, Strike 3, HBP), it is converted to a normal
+     * PLAY event so the walk/strikeout/HBP remains in the scorebook while the pitch
+     * count is corrected.
+     */
+    fun removeRecordedPitch(eventId: Long): Boolean {
+        val original = state.events.firstOrNull { it.id == eventId } ?: return false
+        if (original.type != GameEventType.PITCH || original.pitchAction == null) return false
+
+        mutateCorrection { current ->
+            val updatedEvents = current.events.mapNotNull { event ->
+                if (event.id != eventId) return@mapNotNull event
+                if (event.playAction == null) {
+                    null
+                } else {
+                    event.copy(
+                        type = GameEventType.PLAY,
+                        title = playLabel(event.playAction),
+                        pitchAction = null
+                    )
+                }
+            }
+            renumberEvents(current, updatedEvents)
+        }
+        return true
+    }
+
+    /** Adds a pitch-only correction immediately before a completed plate appearance. */
+    fun addPitchToRecordedAtBat(plateAppearanceEndEventId: Long, action: PitchAction): Boolean {
+        if (action !in setOf(PitchAction.BALL, PitchAction.STRIKE, PitchAction.FOUL, PitchAction.IN_PLAY)) return false
+        val endIndex = state.events.indexOfFirst { it.id == plateAppearanceEndEventId }
+        if (endIndex < 0) return false
+        val endEvent = state.events[endIndex]
+        if (!isPlateAppearanceCompletion(endEvent)) return false
+
+        mutateCorrection { current ->
+            val currentEndIndex = current.events.indexOfFirst { it.id == plateAppearanceEndEventId }
+            if (currentEndIndex < 0) return@mutateCorrection current
+            val currentEnd = current.events[currentEndIndex]
+            val added = GameEvent(
+                id = 0,
+                inning = currentEnd.inning,
+                topOfInning = currentEnd.topOfInning,
+                battingTeam = currentEnd.battingTeam,
+                type = GameEventType.PITCH,
+                title = when (action) {
+                    PitchAction.BALL -> "Ball"
+                    PitchAction.STRIKE -> "Strike"
+                    PitchAction.FOUL -> "Foul"
+                    PitchAction.IN_PLAY -> "In play"
+                    PitchAction.HIT_BY_PITCH -> "Hit by pitch"
+                },
+                detail = "Pitch-history correction • Batter: ${currentEnd.actorName ?: "Unknown"}",
+                actorPlayerId = currentEnd.actorPlayerId,
+                actorName = currentEnd.actorName,
+                team = currentEnd.battingTeam,
+                pitcherName = currentEnd.pitcherName,
+                pitchAction = action
+            )
+            val updated = current.events.toMutableList().apply { add(currentEndIndex, added) }
+            renumberEvents(current, updated)
+        }
+        return true
+    }
+
     fun single() = play(PlayAction.SINGLE)
     fun double() = play(PlayAction.DOUBLE)
     fun triple() = play(PlayAction.TRIPLE)
@@ -64,13 +142,24 @@ class GameController(
     fun triplePlay() = play(PlayAction.TRIPLE_PLAY)
 
     private fun pitch(action: PitchAction) {
-        if (LineupEngine.currentBatter(state) == null) return
-        mutateWithEvent(
-            eventBuilder = { previous, next -> pitchEvent(previous, next, action) }
-        ) { current ->
-            val batterId = LineupEngine.currentBatter(current)?.id ?: return@mutateWithEvent current
-            engine.applyPitch(current, action, batterId)
+        if (state.gameOver) return
+        val batterId = LineupEngine.currentBatter(state)?.id ?: return
+        val previous = state
+        var next = engine.applyPitch(previous, action, batterId)
+        if (next.gameOver && !previous.gameOver && next.endedAtEpochMillis == null) {
+            next = next.copy(endedAtEpochMillis = System.currentTimeMillis())
         }
+        val event = pitchEvent(previous, next, action)
+        next = next.copy(
+            events = next.events + event.copy(id = next.nextEventId),
+            nextEventId = next.nextEventId + 1
+        )
+        history.addLast(previous)
+        while (history.size > MAX_UNDO_STATES) {
+            history.removeFirst()
+        }
+        redoHistory.clear()
+        state = next
     }
 
     fun play(
@@ -80,9 +169,12 @@ class GameController(
         fielding: FieldingPlay? = null
     ) {
         if (LineupEngine.currentBatter(state) == null) return
-        mutateWithEvent(
+        mutateWithEvents(
             eventBuilder = { previous, next ->
-                playEvent(previous, next, action, outsRecorded, manualRunnerDestinations, fielding)
+                listOfNotNull(
+                    terminalPitchForPlay(action)?.let { pitchAction -> outcomePitchEvent(previous, pitchAction) },
+                    playEvent(previous, next, action, outsRecorded, manualRunnerDestinations, fielding)
+                )
             }
         ) { current ->
             engine.applyPlay(
@@ -95,6 +187,39 @@ class GameController(
                 )
             )
         }
+    }
+
+    fun setPitchCount(team: Team, pitcherName: String, targetCount: Int): Boolean {
+        val normalizedName = pitcherName.trim()
+        if (normalizedName.isBlank()) return false
+        val target = targetCount.coerceIn(0, 999)
+        val currentCount = GameStats.pitching(state, team)
+            .lastOrNull { it.pitcherName == normalizedName }
+            ?.pitches
+            ?: 0
+        val adjustment = target - currentCount
+        if (adjustment == 0) return false
+
+        val battingTeam = opposite(team)
+        mutateCorrection { current ->
+            val event = GameEvent(
+                id = current.nextEventId,
+                inning = current.currentInning,
+                topOfInning = current.topOfInning,
+                battingTeam = battingTeam,
+                type = GameEventType.GAME_CORRECTION,
+                title = "Pitch count corrected",
+                detail = "$normalizedName: $currentCount → $target pitches",
+                team = team,
+                pitcherName = normalizedName,
+                pitchCountAdjustment = adjustment
+            )
+            current.copy(
+                events = current.events + event,
+                nextEventId = current.nextEventId + 1
+            )
+        }
+        return true
     }
 
     fun recordBaseRunningEvent(
@@ -854,13 +979,117 @@ class GameController(
                 actorName = batter?.name ?: original.actorName,
                 pitcherName = pitcherName?.trim()?.takeIf(String::isNotBlank) ?: original.pitcherName,
                 playAction = correctedAction,
-                pitchAction = if (correctedType == GameEventType.PLAY) null else original.pitchAction
+                pitchAction = if (correctedType == GameEventType.PLAY) null else original.pitchAction,
+                fieldingNotation = if (correctedAction != null && supportsFieldingNotation(correctedAction)) original.fieldingNotation else null
             )
             val replaced = current.copy(
                 events = current.events.map { if (it.id == eventId) corrected else it }
             )
             recalculateRecordedTotals(replaced)
         }
+    }
+
+    /**
+     * Replaces the editable record for one completed plate appearance in a single
+     * correction. The pitch sequence, batter, pitcher and scoring outcome are
+     * updated together so scorecard and game-stat views stay in sync. Existing
+     * runner movement, runs scored and fielding credits are intentionally kept;
+     * those can be corrected separately from Game Overview.
+     */
+    fun editRecordedAtBat(
+        endEventId: Long,
+        pitches: List<PitchAction>,
+        playAction: PlayAction,
+        batterPlayerId: Int? = null,
+        pitcherName: String? = null,
+        fieldingNotation: String? = null
+    ): Boolean {
+        val originalEndIndex = state.events.indexOfFirst { it.id == endEventId }
+        if (originalEndIndex < 0) return false
+        val originalEnd = state.events[originalEndIndex]
+        if (!isPlateAppearanceCompletion(originalEnd)) return false
+
+        val allowedPitches = normalizeAtBatPitches(pitches, playAction)
+
+        mutateCorrection { current ->
+            val endIndex = current.events.indexOfFirst { it.id == endEventId }
+            if (endIndex < 0) return@mutateCorrection current
+            val endEvent = current.events[endIndex]
+            if (!isPlateAppearanceCompletion(endEvent)) return@mutateCorrection current
+
+            val previousCompletionIndex = current.events
+                .subList(0, endIndex)
+                .indexOfLast(::isPlateAppearanceCompletion)
+            val startIndex = previousCompletionIndex + 1
+            val teamLineup = if (endEvent.battingTeam == Team.AWAY) current.lineupAway else current.lineupHome
+            val batter = batterPlayerId?.let { id -> teamLineup.firstOrNull { it.id == id } }
+            val correctedBatterId = batter?.id ?: endEvent.actorPlayerId
+            val correctedBatterName = batter?.name ?: endEvent.actorName
+            val correctedPitcher = pitcherName?.trim()?.takeIf(String::isNotBlank) ?: endEvent.pitcherName
+
+            val atBatPitchIds = current.events
+                .subList(startIndex, endIndex + 1)
+                .filter { event ->
+                    event.type == GameEventType.PITCH &&
+                        event.battingTeam == endEvent.battingTeam &&
+                        event.actorPlayerId == endEvent.actorPlayerId
+                }
+                .mapTo(mutableSetOf()) { it.id }
+                .apply { add(endEvent.id) }
+
+            val baseEvents = current.events.toMutableList().apply {
+                removeAll { it.id in atBatPitchIds }
+            }
+            val insertionIndex = baseEvents.indexOfFirst { it.id == endEventId }.let { index ->
+                if (index >= 0) index else baseEvents.indexOfFirst { event ->
+                    event.id > endEventId
+                }.let { if (it >= 0) it else baseEvents.size }
+            }
+
+            val pitchEvents = allowedPitches.mapIndexed { index, action ->
+                GameEvent(
+                    id = 0,
+                    inning = endEvent.inning,
+                    topOfInning = endEvent.topOfInning,
+                    battingTeam = endEvent.battingTeam,
+                    type = GameEventType.PITCH,
+                    title = when (action) {
+                        PitchAction.BALL -> "Ball"
+                        PitchAction.STRIKE -> "Strike"
+                        PitchAction.FOUL -> "Foul"
+                        PitchAction.IN_PLAY -> "Ball in play"
+                        PitchAction.HIT_BY_PITCH -> "Hit by pitch"
+                    },
+                    detail = "At-bat correction • Pitch ${index + 1} • Batter: ${correctedBatterName ?: "Unknown"}",
+                    actorPlayerId = correctedBatterId,
+                    actorName = correctedBatterName,
+                    team = endEvent.battingTeam,
+                    pitcherName = correctedPitcher,
+                    pitchAction = action
+                )
+            }
+
+            val correctedEnd = endEvent.copy(
+                id = 0,
+                type = GameEventType.PLAY,
+                title = playLabel(playAction),
+                actorPlayerId = correctedBatterId,
+                actorName = correctedBatterName,
+                pitcherName = correctedPitcher,
+                playAction = playAction,
+                pitchAction = null,
+                outsRecorded = playAction.defaultOuts.coerceIn(0, 3),
+                fieldingNotation = if (supportsFieldingNotation(playAction)) {
+                    fieldingNotation?.trim()?.uppercase()?.takeIf(String::isNotBlank)
+                } else null
+            )
+
+            val rebuilt = baseEvents.toMutableList().apply {
+                addAll(insertionIndex, pitchEvents + correctedEnd)
+            }
+            recalculateRecordedTotals(renumberEvents(current, rebuilt))
+        }
+        return true
     }
 
     fun deleteRecordedEvent(eventId: Long) {
@@ -963,7 +1192,9 @@ class GameController(
             completedAction == PlayAction.HIT_BY_PITCH -> "Hit by pitch"
             action == PitchAction.BALL -> "Ball"
             action == PitchAction.STRIKE -> "Strike"
-            else -> "Foul"
+            action == PitchAction.FOUL -> "Foul"
+            action == PitchAction.IN_PLAY -> "Ball in play"
+            else -> "Hit by pitch"
         }
         val fieldingTeam = opposite(previous.activeTeam)
         val scored = completedAction?.let { actionType ->
@@ -990,6 +1221,60 @@ class GameController(
             scoredRuns = scored,
             putoutPlayerName = catcher
         )
+    }
+
+    private fun normalizeAtBatPitches(pitches: List<PitchAction>, playAction: PlayAction): List<PitchAction> {
+        val allowed = pitches.filter { it in setOf(
+            PitchAction.BALL, PitchAction.STRIKE, PitchAction.FOUL, PitchAction.IN_PLAY, PitchAction.HIT_BY_PITCH
+        ) }
+        val requiredTerminal = terminalPitchForPlay(playAction)
+        if (requiredTerminal == null) return allowed
+        return if (allowed.lastOrNull() == requiredTerminal) allowed else allowed + requiredTerminal
+    }
+
+    private fun outcomePitchEvent(previous: GameState, action: PitchAction): GameEvent {
+        val batter = LineupEngine.currentBatter(previous)
+        val fieldingTeam = opposite(previous.activeTeam)
+        return GameEvent(
+            id = 0,
+            inning = previous.currentInning,
+            topOfInning = previous.topOfInning,
+            battingTeam = previous.activeTeam,
+            type = GameEventType.PITCH,
+            title = when (action) {
+                PitchAction.BALL -> "Ball"
+                PitchAction.STRIKE -> "Strike"
+                PitchAction.FOUL -> "Foul"
+                PitchAction.IN_PLAY -> "Ball in play"
+                PitchAction.HIT_BY_PITCH -> "Hit by pitch"
+            },
+            detail = "Final pitch • Batter: ${batter?.name ?: "Unknown"}",
+            actorPlayerId = batter?.id,
+            actorName = batter?.name,
+            team = previous.activeTeam,
+            pitcherName = previous.pitcherName(fieldingTeam),
+            pitchAction = action
+        )
+    }
+
+    private fun terminalPitchForPlay(action: PlayAction): PitchAction? = when (action) {
+        PlayAction.WALK -> PitchAction.BALL
+        PlayAction.STRIKEOUT -> PitchAction.STRIKE
+        PlayAction.INTENTIONAL_WALK -> null
+        PlayAction.HIT_BY_PITCH -> PitchAction.HIT_BY_PITCH
+        PlayAction.SINGLE,
+        PlayAction.DOUBLE,
+        PlayAction.TRIPLE,
+        PlayAction.HOME_RUN,
+        PlayAction.GROUND_OUT,
+        PlayAction.FLY_OUT,
+        PlayAction.FIELDERS_CHOICE,
+        PlayAction.SACRIFICE,
+        PlayAction.SACRIFICE_BUNT,
+        PlayAction.SACRIFICE_FLY,
+        PlayAction.ERROR,
+        PlayAction.DOUBLE_PLAY,
+        PlayAction.TRIPLE_PLAY -> PitchAction.IN_PLAY
     }
 
     private fun playEvent(
@@ -1023,8 +1308,10 @@ class GameController(
             scoredPlayerIds = scored.map(ScoredRun::playerId),
             scoredRuns = scored,
             putoutPlayerName = fielding?.putoutPlayerName,
+            putoutPlayerNames = fielding?.putoutPlayerNames.orEmpty(),
             assistPlayerNames = fielding?.assistPlayerNames.orEmpty(),
-            errorPlayerName = fielding?.errorPlayerName
+            errorPlayerName = fielding?.errorPlayerName,
+            fieldingNotation = fielding?.fieldingNotation
         )
     }
 
@@ -1384,6 +1671,42 @@ class GameController(
         )
     }
 
+    private fun removeCurrentCountPitch(
+        matches: (PitchAction) -> Boolean,
+        updateCount: (GameState) -> GameState
+    ): Boolean {
+        val batterId = LineupEngine.currentBatter(state)?.id ?: return false
+        val lastCompletionIndex = state.events.indexOfLast(::isPlateAppearanceCompletion)
+        val candidate = state.events
+            .drop(lastCompletionIndex + 1)
+            .asReversed()
+            .firstOrNull { event ->
+                event.type == GameEventType.PITCH &&
+                    event.playAction == null &&
+                    event.battingTeam == state.activeTeam &&
+                    event.actorPlayerId == batterId &&
+                    event.pitchAction?.let(matches) == true
+            } ?: return false
+
+        mutateCorrection { current ->
+            updateCount(current).copy(
+                events = current.events.filterNot { it.id == candidate.id }
+            )
+        }
+        return true
+    }
+
+    private fun isPlateAppearanceCompletion(event: GameEvent): Boolean =
+        event.playAction != null && (event.type == GameEventType.PLAY || event.type == GameEventType.PITCH)
+
+    private fun renumberEvents(current: GameState, events: List<GameEvent>): GameState {
+        val renumbered = events.mapIndexed { index, event -> event.copy(id = index + 1L) }
+        return current.copy(
+            events = renumbered,
+            nextEventId = renumbered.size + 1L
+        )
+    }
+
     private fun mutate(block: (GameState) -> GameState) {
         mutateWithEvent(eventBuilder = null, block = block)
     }
@@ -1392,6 +1715,35 @@ class GameController(
         val previous = state
         val next = block(previous)
         if (next == previous) return
+        history.addLast(previous)
+        while (history.size > MAX_UNDO_STATES) {
+            history.removeFirst()
+        }
+        redoHistory.clear()
+        state = next
+    }
+
+    private fun mutateWithEvents(
+        eventBuilder: ((GameState, GameState) -> List<GameEvent>)?,
+        block: (GameState) -> GameState
+    ) {
+        if (state.gameOver) return
+        val previous = state
+        var next = block(previous)
+        if (next == previous) return
+        if (next.gameOver && !previous.gameOver && next.endedAtEpochMillis == null) {
+            next = next.copy(endedAtEpochMillis = System.currentTimeMillis())
+        }
+
+        val events = eventBuilder?.invoke(previous, next).orEmpty()
+        if (events.isNotEmpty()) {
+            val startId = next.nextEventId
+            next = next.copy(
+                events = next.events + events.mapIndexed { index, event -> event.copy(id = startId + index) },
+                nextEventId = startId + events.size
+            )
+        }
+
         history.addLast(previous)
         while (history.size > MAX_UNDO_STATES) {
             history.removeFirst()
@@ -1427,6 +1779,14 @@ class GameController(
         redoHistory.clear()
         state = next
     }
+
+    private fun supportsFieldingNotation(action: PlayAction): Boolean = action in setOf(
+        PlayAction.GROUND_OUT,
+        PlayAction.FLY_OUT,
+        PlayAction.SACRIFICE_FLY,
+        PlayAction.DOUBLE_PLAY,
+        PlayAction.TRIPLE_PLAY
+    )
 
     companion object {
         const val UNKNOWN_PLAYER_SELECTION: Int = Int.MIN_VALUE

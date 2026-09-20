@@ -236,10 +236,15 @@ object GameStats {
                 when (event.pitchAction) {
                     PitchAction.BALL -> current.balls++
                     PitchAction.STRIKE,
-                    PitchAction.FOUL -> current.strikes++
+                    PitchAction.FOUL,
+                    PitchAction.IN_PLAY -> current.strikes++
                     PitchAction.HIT_BY_PITCH -> current.balls++
                     null -> Unit
                 }
+            }
+
+            if (event.type == GameEventType.GAME_CORRECTION && current != null && event.pitchCountAdjustment != 0) {
+                current.pitches = (current.pitches + event.pitchCountAdjustment).coerceAtLeast(0)
             }
 
             val action = event.playAction
@@ -301,16 +306,19 @@ object GameStats {
         state.events.forEach { event ->
             val fieldingTeam = if (event.battingTeam == Team.AWAY) Team.HOME else Team.AWAY
             if (fieldingTeam != team) return@forEach
-            event.putoutPlayerName?.takeIf(String::isNotBlank)?.let { fielder(it).po++ }
+            val putoutNames = event.putoutPlayerNames
+                .filter(String::isNotBlank)
+                .ifEmpty { listOfNotNull(event.putoutPlayerName?.takeIf(String::isNotBlank)) }
+            putoutNames.forEach { fielder(it).po++ }
             event.assistPlayerNames.filter(String::isNotBlank).distinct().forEach { fielder(it).a++ }
             if (event.playAction == PlayAction.ERROR || event.type == GameEventType.FIELDING_CREDIT) {
                 event.errorPlayerName?.takeIf(String::isNotBlank)?.let { fielder(it).e++ }
             }
             if (event.playAction == PlayAction.DOUBLE_PLAY) {
-                (event.assistPlayerNames + listOfNotNull(event.putoutPlayerName)).distinct().forEach { fielder(it).dp++ }
+                (event.assistPlayerNames + putoutNames).distinct().forEach { fielder(it).dp++ }
             }
             if (event.playAction == PlayAction.TRIPLE_PLAY) {
-                (event.assistPlayerNames + listOfNotNull(event.putoutPlayerName)).distinct().forEach { fielder(it).tp++ }
+                (event.assistPlayerNames + putoutNames).distinct().forEach { fielder(it).tp++ }
             }
             if (event.type == GameEventType.BASERUNNING && event.baseRunningAction == BaseRunningAction.PASSED_BALL) {
                 val catcher = event.errorPlayerName ?: lineup.firstOrNull { state.playerPosition(it.id) == "C" }?.name

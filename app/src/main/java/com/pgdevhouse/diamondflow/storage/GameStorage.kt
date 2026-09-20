@@ -284,9 +284,12 @@ class GameStorage(context: Context) {
                     }
                 })
                 event.putoutPlayerName?.let { put("putoutPlayerName", it) }
+                put("putoutPlayerNames", JSONArray().apply { event.putoutPlayerNames.forEach(::put) })
                 put("assistPlayerNames", JSONArray().apply { event.assistPlayerNames.forEach(::put) })
                 event.errorPlayerName?.let { put("errorPlayerName", it) }
+                event.fieldingNotation?.let { put("fieldingNotation", it) }
                 put("inheritedRunners", event.inheritedRunners)
+                put("pitchCountAdjustment", event.pitchCountAdjustment)
             })
         }
     }
@@ -335,9 +338,12 @@ class GameStorage(context: Context) {
                         scoredPlayerIds = item.optJSONArray("scoredPlayerIds").toIntValues(),
                         scoredRuns = item.optJSONArray("scoredRuns").toScoredRuns(),
                         putoutPlayerName = item.optString("putoutPlayerName").takeIf(String::isNotBlank),
+                        putoutPlayerNames = item.optJSONArray("putoutPlayerNames").toStringValues(),
                         assistPlayerNames = item.optJSONArray("assistPlayerNames").toStringValues(),
                         errorPlayerName = item.optString("errorPlayerName").takeIf(String::isNotBlank),
-                        inheritedRunners = item.optInt("inheritedRunners", 0).coerceAtLeast(0)
+                        fieldingNotation = item.optString("fieldingNotation").takeIf(String::isNotBlank),
+                        inheritedRunners = item.optInt("inheritedRunners", 0).coerceAtLeast(0),
+                        pitchCountAdjustment = item.optInt("pitchCountAdjustment", 0)
                     )
                 )
             }
