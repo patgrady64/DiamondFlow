@@ -97,7 +97,8 @@ private enum class SetupStep {
 private enum class GameView {
     SCOREKEEPING,
     OVERVIEW,
-    SCORECARD
+    SCORECARD,
+    STATS
 }
 
 private val DEFENSIVE_POSITIONS = listOf("C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "DH")
@@ -446,6 +447,7 @@ private fun HomeScreen(
     var showReplaceConfirm by remember { mutableStateOf(false) }
     var showDiscardConfirm by remember { mutableStateOf(false) }
     var showImportConfirm by remember { mutableStateOf(false) }
+    var settingsExpanded by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -454,12 +456,63 @@ private fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Spacer(Modifier.height(8.dp))
-        Text("InningTrack", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Black)
-        Text(
-            "Baseball scorekeeping",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Top
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("InningTrack", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Black)
+                Text(
+                    "Baseball scorekeeping",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Box {
+                TextButton(onClick = { settingsExpanded = true }) {
+                    Text("Settings")
+                }
+                DropdownMenu(
+                    expanded = settingsExpanded,
+                    onDismissRequest = { settingsExpanded = false }
+                ) {
+                    Text(
+                        "Settings",
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        fontWeight = FontWeight.Bold
+                    )
+                    HorizontalDivider()
+                    Text(
+                        "Backup & Restore",
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 4.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Export Backup") },
+                        onClick = {
+                            settingsExpanded = false
+                            onExportBackup()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Restore Backup") },
+                        onClick = {
+                            settingsExpanded = false
+                            showImportConfirm = true
+                        }
+                    )
+                }
+            }
+        }
+
+        backupMessage?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
 
         Button(
             onClick = {
@@ -475,27 +528,6 @@ private fun HomeScreen(
             modifier = Modifier.fillMaxWidth().height(52.dp)
         ) {
             Text("Teams & Players (${savedTeams.size})")
-        }
-
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text("Backup & Restore", fontWeight = FontWeight.Bold)
-                Text(
-                    "Back up saved teams, the active game, and every completed game in one InningTrack file.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onExportBackup, modifier = Modifier.weight(1f)) { Text("Export Backup") }
-                    OutlinedButton(onClick = { showImportConfirm = true }, modifier = Modifier.weight(1f)) { Text("Restore Backup") }
-                }
-                backupMessage?.let {
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-                }
-            }
         }
 
         activeGame?.let { game ->
@@ -1647,6 +1679,7 @@ private fun GameScreen(
                 onEditPersonnelEvent = onEditPersonnelEvent
             )
             GameView.SCORECARD -> FullScorecardScreen(state)
+            GameView.STATS -> LiveStatsScreen(state)
         }
 
         Spacer(Modifier.height(18.dp))
@@ -1731,26 +1764,30 @@ private fun GameViewSwitcher(
     onSelected: (GameView) -> Unit
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         FilterChip(
             selected = selected == GameView.SCOREKEEPING,
             onClick = { onSelected(GameView.SCOREKEEPING) },
-            label = { Text("Scorekeeping") },
-            modifier = Modifier.weight(1f)
+            label = { Text("Scorekeeping") }
         )
         FilterChip(
             selected = selected == GameView.OVERVIEW,
             onClick = { onSelected(GameView.OVERVIEW) },
-            label = { Text("Game Overview") },
-            modifier = Modifier.weight(1f)
+            label = { Text("Game Overview") }
         )
         FilterChip(
             selected = selected == GameView.SCORECARD,
             onClick = { onSelected(GameView.SCORECARD) },
-            label = { Text("Scorecard") },
-            modifier = Modifier.weight(1f)
+            label = { Text("Scorecard") }
+        )
+        FilterChip(
+            selected = selected == GameView.STATS,
+            onClick = { onSelected(GameView.STATS) },
+            label = { Text("Stats") }
         )
     }
 }
@@ -1807,11 +1844,6 @@ private fun GameOverview(
         onPositionChange = onPositionChange,
         onReorderLineup = onReorderLineup,
         onSaveCurrentTeam = onSaveCurrentTeam
-    )
-
-    GameStatsCard(
-        state = state,
-        onResolveUnknownPlayer = onResolveUnknownPlayer
     )
 
     GameLogCard(
@@ -4649,6 +4681,182 @@ private fun CurrentBatterDropdown(
                     onSelected(player.id)
                 })
             }
+        }
+    }
+}
+
+@Composable
+private fun LiveStatsScreen(state: GameState) {
+    val battingTeam = state.activeTeam
+    val pitchingTeam = if (battingTeam == Team.AWAY) Team.HOME else Team.AWAY
+    val battingStats = remember(state.events, state.lineupAway, state.lineupHome, battingTeam) {
+        GameStats.batting(state, battingTeam)
+    }
+    val pitchingStats = remember(state.events, state.awayPitcherName, state.homePitcherName, pitchingTeam) {
+        GameStats.pitching(state, pitchingTeam)
+    }
+    val currentBatter = LineupEngine.currentBatter(state)
+    val currentBatterStats = currentBatter?.let { batter ->
+        battingStats.firstOrNull { it.playerId == batter.id }
+            ?: BattingStats(playerId = batter.id, playerName = batter.name)
+    }
+    val currentPitcherName = state.pitcherName(pitchingTeam)
+    val currentPitcherStats = pitchingStats.lastOrNull { it.pitcherName == currentPitcherName }
+        ?: pitchingStats.lastOrNull()
+
+    ScoreboardCard(state)
+
+    FullGameStatsSummary(state)
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                "Pitching — ${state.teamName(pitchingTeam)}",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                "Current pitcher: ${currentPitcherStats?.pitcherName ?: currentPitcherName}",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            currentPitcherStats?.let { stat ->
+                CompactStatGrid(
+                    listOf(
+                        "IP" to stat.inningsPitchedDisplay,
+                        "Pitches" to stat.pitches.toString(),
+                        "H" to stat.hitsAllowed.toString(),
+                        "R" to stat.runsAllowed.toString(),
+                        "ER" to stat.earnedRuns.toString(),
+                        "BB" to stat.walks.toString(),
+                        "SO" to stat.strikeouts.toString(),
+                        "ERA" to formatRate(stat.era),
+                        "WHIP" to formatRate(stat.whip)
+                    )
+                )
+            }
+            PitchingStatsTable(pitchingStats)
+        }
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                "Batting — ${state.teamName(battingTeam)}",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            BattingStatsTable(battingStats)
+        }
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text("Current Batter", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            if (currentBatterStats == null) {
+                Text(
+                    "No current batter is selected.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Text(currentBatterStats.playerName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                CompactStatGrid(
+                    listOf(
+                        "PA" to currentBatterStats.plateAppearances.toString(),
+                        "AB" to currentBatterStats.atBats.toString(),
+                        "R" to currentBatterStats.runs.toString(),
+                        "H" to currentBatterStats.hits.toString(),
+                        "RBI" to currentBatterStats.rbi.toString(),
+                        "BB" to currentBatterStats.walks.toString(),
+                        "SO" to currentBatterStats.strikeouts.toString(),
+                        "AVG" to formatRate(currentBatterStats.average),
+                        "OBP" to formatRate(currentBatterStats.onBasePercentage),
+                        "SLG" to formatRate(currentBatterStats.slugging),
+                        "OPS" to formatRate(currentBatterStats.ops)
+                    )
+                )
+            }
+        }
+    }
+
+    if (state.trackingStartedMidGame) {
+        Text(
+            "Stats include only play recorded after InningTrack began tracking this game; earlier activity is not estimated.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.tertiary,
+            modifier = Modifier.padding(horizontal = 4.dp)
+        )
+    }
+}
+
+@Composable
+private fun FullGameStatsSummary(state: GameState) {
+    val awayBatting = remember(state.events, state.lineupAway) { GameStats.batting(state, Team.AWAY) }
+    val homeBatting = remember(state.events, state.lineupHome) { GameStats.batting(state, Team.HOME) }
+
+    fun teamTotals(team: Team, batting: List<BattingStats>): List<String> = listOf(
+        state.teamName(team),
+        state.totalRuns(team).toString(),
+        (state.hits[team] ?: 0).toString(),
+        (state.errors[team] ?: 0).toString(),
+        batting.sumOf { it.plateAppearances }.toString(),
+        batting.sumOf { it.atBats }.toString(),
+        batting.sumOf { it.walks }.toString(),
+        batting.sumOf { it.strikeouts }.toString()
+    )
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(9.dp)
+        ) {
+            Text("Full Game Stats", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "${if (state.topOfInning) "Top" else "Bottom"} ${state.currentInning} • ${state.outs} out${if (state.outs == 1) "" else "s"}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Column(modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                StatsRow(listOf("Team", "R", "H", "E", "PA", "AB", "BB", "SO"), header = true)
+                StatsRow(teamTotals(Team.AWAY, awayBatting))
+                StatsRow(teamTotals(Team.HOME, homeBatting))
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompactStatGrid(stats: List<Pair<String, String>>) {
+    stats.chunked(4).forEach { rowStats ->
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            rowStats.forEach { (label, value) ->
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(value, fontWeight = FontWeight.Bold, maxLines = 1)
+                    }
+                }
+            }
+            repeat(4 - rowStats.size) { Spacer(modifier = Modifier.weight(1f)) }
         }
     }
 }
