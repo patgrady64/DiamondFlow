@@ -25,6 +25,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -809,7 +810,8 @@ private fun TeamRosterEditorScreen(
             onValueChange = { teamName = it },
             modifier = Modifier.fillMaxWidth(),
             label = { Text("Team name") },
-            singleLine = true
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words)
         )
         Text(
             "Players saved here form your reusable roster. A position is optional and is only a default for future setup; it can be changed every game.",
@@ -830,7 +832,8 @@ private fun TeamRosterEditorScreen(
                     },
                     modifier = Modifier.weight(1f),
                     label = { Text("Player ${index + 1}") },
-                    singleLine = true
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words)
                 )
                 RosterPositionDropdown(
                     position = playerPositions.getOrNull(index).orEmpty(),
@@ -1051,14 +1054,16 @@ private fun GameSetupScreen(
                     onValueChange = { awayPitcher = it },
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("${awayName.ifBlank { "Away" }} pitcher") },
-                    singleLine = true
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words)
                 )
                 OutlinedTextField(
                     value = homePitcher,
                     onValueChange = { homePitcher = it },
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("${homeName.ifBlank { "Home" }} pitcher") },
-                    singleLine = true
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words)
                 )
             }
 
@@ -1230,7 +1235,8 @@ private fun TeamWizardStep(
         onValueChange = onTeamNameChange,
         modifier = Modifier.fillMaxWidth(),
         label = { Text("Team name") },
-        singleLine = true
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words)
     )
 }
 
@@ -1289,7 +1295,8 @@ private fun LineupWizardTeamEditor(
                     },
                     modifier = Modifier.weight(1f),
                     label = { Text("${index + 1}. Batter") },
-                    singleLine = true
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words)
                 )
                 WizardPositionDropdown(
                     position = resolvedPositions[index],
@@ -1426,7 +1433,8 @@ private fun TeamSetupEditor(
             onValueChange = onTeamNameChange,
             modifier = Modifier.fillMaxWidth(),
             label = { Text("$sideLabel team name") },
-            singleLine = true
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words)
         )
 
         OutlinedTextField(
@@ -1436,7 +1444,8 @@ private fun TeamSetupEditor(
             label = { Text("${teamName.ifBlank { sideLabel }} lineup") },
             supportingText = { Text("One player per line. Leave blank for nine placeholder players.") },
             minLines = 4,
-            maxLines = 9
+            maxLines = 9,
+            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words)
         )
 
         Row(
@@ -2085,7 +2094,10 @@ private fun InlinePersonnelNameField(
         onValueChange = { draft = it },
         label = { Text(label) },
         singleLine = true,
-        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+        keyboardOptions = KeyboardOptions(
+            capitalization = KeyboardCapitalization.Words,
+            imeAction = ImeAction.Done
+        ),
         keyboardActions = KeyboardActions(onDone = { commit() }),
         modifier = modifier.onFocusChanged { focusState ->
             if (!focusState.isFocused) commit()
@@ -2715,7 +2727,8 @@ private fun NameEntryDialog(
                     onValueChange = { name = it },
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text(label) },
-                    singleLine = true
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words)
                 )
                 supportingText?.let {
                     Text(
@@ -2781,7 +2794,8 @@ private fun PinchRunnerDialog(
                     onValueChange = { name = it },
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("New runner name") },
-                    singleLine = true
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words)
                 )
                 selectedRunner?.let { (_, baseLabel, playerId) ->
                     Text(
@@ -2835,11 +2849,14 @@ private fun DiamondCard(state: GameState) {
                 .padding(12.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text("Bases", fontWeight = FontWeight.SemiBold)
+            Text(
+                text = "Inning ${state.currentInning}",
+                fontWeight = FontWeight.SemiBold
+            )
             Box(
                 modifier = Modifier
                     .width(300.dp)
-                    .height(230.dp)
+                    .height(242.dp)
             ) {
                 BaseSpot(
                     baseLabel = "2B",
@@ -2869,6 +2886,14 @@ private fun DiamondCard(state: GameState) {
                     modifier = Modifier.offset(x = 100.dp, y = 168.dp),
                     width = 100.dp,
                     home = true
+                )
+                Text(
+                    text = "Balls ${state.balls}  |  Strikes ${state.strikes}  |  Outs ${state.outs}",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 2.dp, bottom = 2.dp)
                 )
             }
         }
@@ -3941,7 +3966,14 @@ private fun HistoricalEventCorrectionDialog(
             Column(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("${if (event.topOfInning) "Top" else "Bottom"} ${event.inning} — ${event.title}")
                 PlayerIdDropdown("Batter", lineup, batterId) { batterId = it }
-                OutlinedTextField(value = pitcher, onValueChange = { pitcher = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Pitcher") }, singleLine = true)
+                OutlinedTextField(
+                    value = pitcher,
+                    onValueChange = { pitcher = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Pitcher") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words)
+                )
                 Box(modifier = Modifier.fillMaxWidth()) {
                     OutlinedButton(onClick = { actionExpanded = true }, modifier = Modifier.fillMaxWidth()) {
                         Text("Scoring: ${action?.let(::plainPlayLabel) ?: "Unknown"}")
